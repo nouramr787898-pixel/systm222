@@ -6,7 +6,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 
 BASE=Path(__file__).resolve().parent
-DB=BASE/'ehkam_demo.sqlite3'
+DB=BASE/'ehkam_data.sqlite3'
 SESSIONS={}
 LOCK=threading.Lock()
 TODAY=datetime.date.today
@@ -145,11 +145,13 @@ class Handler(BaseHTTPRequestHandler):
    return self.write((BASE/'index.html').read_bytes(),ctype='text/html')
   if method=='GET' and path=='/style.css':return self.write((BASE/'style.css').read_bytes(),ctype='text/css')
   if method=='GET' and path=='/app.js':return self.write((BASE/'app.js').read_bytes(),ctype='text/javascript')
+  if method=='GET' and path in ('/favicon.ico','/favicon.png','/ehkam-icon.png','/ehkam-logo-full.png'):
+   return self.write((BASE/path.lstrip('/')).read_bytes(),ctype='image/x-icon' if path.endswith('.ico') else 'image/png')
   c=conn()
   try:
    if method=='POST' and path=='/api/login':
     d=self.input();u=c.execute('SELECT * FROM users WHERE username=?',(d.get('username',''),)).fetchone()
-    if not u or not verifypw(d.get('password',''),u['password_hash']):fail('بيانات الدخول غير صحيحة',401)
+    if not u or not verifypw(d.get('password',''),u['password_hash']) or u['role']!=d.get('account_role'):fail('بيانات الدخول أو نوع الحساب غير صحيحة',401)
     token=secrets.token_urlsafe(32)
     with LOCK:SESSIONS[token]=u['id']
     record(c,u,'login','user',u['id']);c.commit()
@@ -280,5 +282,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__=='__main__':
  init();port=int(os.environ.get('PORT','8765'))
- print(f'EHKAM local prototype: http://127.0.0.1:{port}');print('Demo users: admin / Admin@123; manager / Manager@123; employee / Employee@123')
+ print(f'EHKAM working local server: http://127.0.0.1:{port}');print('Demo users: admin / Admin@123; manager / Manager@123; employee / Employee@123')
  ThreadingHTTPServer(('127.0.0.1',port),Handler).serve_forever()
