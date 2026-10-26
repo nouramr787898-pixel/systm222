@@ -1,7 +1,8 @@
 """EHKAM HR Portal - local functional prototype. Run: python server.py"""
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import sqlite3, json, os, hashlib, hmac, secrets, datetime, csv, io, threading
+import sqlite3, json, os, hashlib, hmac, secrets, datetime, csv, io, threading, re, time, ssl, smtplib, urllib.request, urllib.parse, base64
+from email.message import EmailMessage
 from http.cookies import SimpleCookie
 from pathlib import Path
 
@@ -9,6 +10,7 @@ BASE=Path(__file__).resolve().parent
 DB=BASE/'ehkam_data.sqlite3'
 SESSIONS={}
 LOCK=threading.Lock()
+RESET_ATTEMPTS={}
 TODAY=datetime.date.today
 
 def now(): return datetime.datetime.now().isoformat(timespec='seconds')
@@ -41,7 +43,41 @@ def init():
    c.execute('''INSERT INTO employees(company_id,name,name_en,employee_no,job,department,manager_id,basic,housing,transport,carryover,hire_date,contract_start,contract_end,archived) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(co,name,en,no,job,dep,manager,basic,housing,trans,carry,start,start,end,arch))
   for username,pw,role,eid in [('admin','Admin@123','admin',None),('manager','Manager@123','manager',1),('employee','Employee@123','employee',2)]:
    c.execute('INSERT INTO users(username,password_hash,role,employee_id,company_id) VALUES(?,?,?,?,?)',(username,hashpw(pw),role,eid,co if role!='admin' else None))
+
+ # Add employee profile photo column to older installations safely.
+ columns={row[1] for row in c.execute('PRAGMA table_info(employees)')}
+ if 'photo' not in columns:c.execute('ALTER TABLE employees ADD COLUMN photo TEXT DEFAULT NULL')
+ for col in ('phone_country','phone_local','email'):
+  if col not in columns:c.execute('ALTER TABLE employees ADD COLUMN '+col+' TEXT DEFAULT NULL')
+ c.execute('''CREATE TABLE IF NOT EXISTS password_resets(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL, code_hash TEXT NOT NULL,expires_at INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,used INTEGER NOT NULL DEFAULT 0)''')
  c.commit();c.close()
+
+def send_reset(channel,destination,code):
+ if channel=='email':
+  host=os.environ.get('SMTP_HOST');sender=os.environ.get('SMTP_FROM')
+  if not (host and sender and os.environ.get('SMTP_USER') and os.environ.get('SMTP_PASSWORD')):return False
+  msg=EmailMessage();msg['Subject']='إحكام: رمز استعادة كلمة المرور';msg['From']=sender;msg['To']=destination
+  msg.set_content('رمز إعادة تعيين كلمة المرور: '+code+'\nصالح لمدة 10 دقائق. لا تشاركه مع أحد.')
+  with smtplib.SMTP(host,int(os.environ.get('SMTP_PORT','587')),timeout=12) as smtp:
+   smtp.starttls(context=ssl.create_default_context());smtp.login(os.environ['SMTP_USER'],os.environ['SMTP_PASSWORD']);smtp.send_message(msg)
+  return True
+ if channel=='sms':
+  sid=os.environ.get('TWILIO_ACCOUNT_SID');auth=os.environ.get('TWILIO_AUTH_TOKEN');from_number=os.environ.get('TWILIO_FROM_NUMBER')
+  if not (sid and auth and from_number):return False
+  data=urllib.parse.urlencode({'To':destination,'From':from_number,'Body':'EHKAM password reset code: '+code+' (valid 10 minutes)'}).encode()
+  url='https://api.twilio.com/2010-04-01/Accounts/'+sid+'/Messages.json'
+  req=urllib.request.Request(url,data=data,method='POST');req.add_header('Authorization','Basic '+base64.b64encode((sid+':'+auth).encode()).decode())
+  with urllib.request.urlopen(req,timeout=12) as resp:return 200<=resp.status<300
+ return False
+
+def clean_contacts(d):
+ country=str(d.get('phone_country') or '+966');local=re.sub(r'[^0-9]','',str(d.get('phone_local') or ''))
+ if country not in ('+966','+20'):fail('رمز الدولة يجب أن يكون +966 أو +20')
+ if local.startswith('0'):local=local[1:]
+ if local and not (8<=len(local)<=10):fail('يرجى إدخال رقم جوال صحيح')
+ email=str(d.get('email') or '').strip().lower()
+ if email and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):fail('البريد الإلكتروني غير صحيح')
+ return country,local,email
 
 def record(c,u,action,entity,eid=None,info=''):
  c.execute('INSERT INTO audit(user_id,username,action,entity,entity_id,info,timestamp) VALUES(?,?,?,?,?,?,?)',(u['id'],u['username'],action,entity,eid,info,now()))
@@ -156,6 +192,43 @@ class Handler(BaseHTTPRequestHandler):
     with LOCK:SESSIONS[token]=u['id']
     record(c,u,'login','user',u['id']);c.commit()
     return self.write({'ok':True},headers={'Set-Cookie':'ehkam_session='+token+'; HttpOnly; SameSite=Strict; Path=/'})
+   if method=='POST' and path=='/api/password/request':
+    d=self.input();username=str(d.get('username','')).strip();channel=d.get('channel');ip=self.client_address[0]
+    if channel not in ('email','sms') or not username:fail('حدد وسيلة الاستعادة واسم المستخدم')
+    key=(ip,username);current=int(time.time())
+    with LOCK:
+     timestamps=[t for t in RESET_ATTEMPTS.get(key,[]) if current-t<3600]
+     if len(timestamps)>=5:fail('محاولات كثيرة؛ حاول لاحقًا',429)
+     timestamps.append(current);RESET_ATTEMPTS[key]=timestamps
+    u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
+    generic={'message':'إذا كان الحساب موجودًا ووسيلة التواصل مفعلة، سيصلك رمز الاستعادة.'}
+    if not u:return self.write(generic)
+    e=c.execute('SELECT phone_country,phone_local,email FROM employees WHERE id=?',(u['employee_id'],)).fetchone()
+    if not e:return self.write(generic)
+    destination=e['email'] if channel=='email' else (str(e['phone_country'] or '')+str(e['phone_local'] or '') if e['phone_local'] else '')
+    if not destination:return self.write(generic)
+    if channel=='email' and not all(os.environ.get(x) for x in ('SMTP_HOST','SMTP_FROM','SMTP_USER','SMTP_PASSWORD')):fail('خدمة إرسال البريد لم تُضبط بعد؛ تواصل مع الإدارة',503)
+    if channel=='sms' and not all(os.environ.get(x) for x in ('TWILIO_ACCOUNT_SID','TWILIO_AUTH_TOKEN','TWILIO_FROM_NUMBER')):fail('خدمة SMS لم تُضبط بعد؛ تواصل مع الإدارة',503)
+    code=str(secrets.randbelow(1000000)).zfill(6);tokenhash=hashlib.sha256((username+':'+code).encode()).hexdigest()
+    try:sent=send_reset(channel,destination,code)
+    except Exception:sent=False
+    if not sent:fail('تعذر إرسال الرمز حاليًا؛ حاول لاحقًا',503)
+    c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
+    c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at) VALUES(?,?,?)',(u['id'],tokenhash,current+600));c.commit()
+    return self.write(generic)
+   if method=='POST' and path=='/api/password/confirm':
+    d=self.input();username=str(d.get('username','')).strip();code=str(d.get('code','')).strip();password=str(d.get('new_password',''))
+    if not re.fullmatch(r'\d{6}',code) or len(password)<10 or len(password)>128:fail('الرمز 6 أرقام وكلمة المرور الجديدة 10 أحرف على الأقل')
+    u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
+    if not u:fail('الرمز غير صحيح أو منتهي',400)
+    r=c.execute('SELECT * FROM password_resets WHERE user_id=? AND used=0 ORDER BY id DESC LIMIT 1',(u['id'],)).fetchone()
+    if not r or r['expires_at']<int(time.time()) or r['attempts']>=5:fail('الرمز غير صحيح أو منتهي')
+    c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],))
+    expected=hashlib.sha256((username+':'+code).encode()).hexdigest()
+    if not hmac.compare_digest(expected,r['code_hash']):c.commit();fail('الرمز غير صحيح أو منتهي')
+    c.execute('UPDATE users SET password_hash=? WHERE id=?',(hashpw(password),u['id']))
+    c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
+    record(c,u,'password_reset','user',u['id']);c.commit();return self.write({'ok':True})
    u=self.actor(c)
    if path=='/api/me' and method=='GET':return self.write(dict(u))
    if path=='/api/logout' and method=='POST':
@@ -182,21 +255,29 @@ class Handler(BaseHTTPRequestHandler):
     d=self.input();co=int(d.get('company_id',0));exists=c.execute('SELECT id FROM companies WHERE id=? AND archived=0',(co,)).fetchone()
     if not exists:fail('الشركة غير موجودة')
     if not d.get('name') or not d.get('employee_no'):fail('الاسم والرقم الوظيفي مطلوبان')
-    keys=['company_id','name','name_en','employee_no','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method']
-    values=[d.get(k) for k in keys];defaults={'name_en':'','identity_no':'','job':'','department':'','manager_id':None,'status':'نشط','basic':0,'housing':0,'transport':0,'other':0,'annual_entitlement':21,'carryover':0,'workweek':'0,1,2,3,5,6','work_start':'09:00','work_end':'17:00','payment_method':'bank'}
+    country,phone,email=clean_contacts(d)
+    username=str(d.get('login_username','')).strip();newpw=str(d.get('login_password',''))
+    if not username or len(newpw)<10 or len(newpw)>128 or not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}',username):fail('اسم دخول إنجليزي 3–64 حرف وكلمة مرور لا تقل عن 10 أحرف مطلوبان')
+    if c.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():fail('اسم المستخدم مستخدم بالفعل')
+    keys=['phone_country','phone_local','email','photo','company_id','name','name_en','employee_no','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method']
+    values=[(country if k=='phone_country' else phone if k=='phone_local' else email if k=='email' else d.get(k)) for k in keys];defaults={'name_en':'','identity_no':'','job':'','department':'','manager_id':None,'status':'نشط','basic':0,'housing':0,'transport':0,'other':0,'annual_entitlement':21,'carryover':0,'workweek':'0,1,2,3,5,6','work_start':'09:00','work_end':'17:00','payment_method':'bank'}
     values=[defaults.get(k) if v is None else v for k,v in zip(keys,values)]
     if d.get('manager_id'):
      m=c.execute('SELECT company_id FROM employees WHERE id=?',(d['manager_id'],)).fetchone()
      if not m or m['company_id']!=co:fail('المشرف يجب أن يتبع نفس الشركة')
     try:cur=c.execute('INSERT INTO employees('+','.join(keys)+') VALUES('+','.join('?' for _ in keys)+')',values)
     except sqlite3.IntegrityError:fail('رقم الموظف مستخدم داخل هذه الشركة')
+    c.execute('INSERT INTO users(username,password_hash,role,employee_id,company_id) VALUES(?,?,?,?,?)',(username,hashpw(newpw),'employee',cur.lastrowid,co))
     record(c,u,'create','employee',cur.lastrowid,d['name']);c.commit();return self.write({'id':cur.lastrowid},201)
    if path.startswith('/api/employees/') and method=='POST':
     if u['role']!='admin':fail('غير مصرح',403)
     eid=int(path.rsplit('/',1)[1]);e=user_allowed_emp(c,u,eid);d=self.input()
-    permitted={'name','name_en','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method'}
+    permitted={'photo','name','name_en','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method'}
     changes={k:v for k,v in d.items() if k in permitted}
     if not changes:fail('لا توجد بيانات للتعديل')
+    if 'photo' in changes:
+     photo=changes['photo']
+     if photo is not None and (not isinstance(photo,str) or len(photo)>300000 or not photo.startswith(('data:image/png;base64,','data:image/jpeg;base64,','data:image/webp;base64,'))):fail('صيغة الصورة غير مقبولة أو حجمها كبير')
     if changes.get('manager_id'):
      m=c.execute('SELECT company_id FROM employees WHERE id=?',(changes['manager_id'],)).fetchone()
      if not m or m['company_id']!=e['company_id']:fail('المشرف يجب أن يتبع نفس الشركة')
@@ -282,5 +363,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__=='__main__':
  init();port=int(os.environ.get('PORT','8765'))
- print(f'EHKAM server listening on 0.0.0.0:{port}', flush=True)
+ print(f'EHKAM working local server: http://127.0.0.1:{port}');# Never print credentials into public hosting logs
  ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()
