@@ -50,25 +50,43 @@ def init():
  for col in ('phone_country','phone_local','email'):
   if col not in columns:c.execute('ALTER TABLE employees ADD COLUMN '+col+' TEXT DEFAULT NULL')
  c.execute('''CREATE TABLE IF NOT EXISTS password_resets(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL, code_hash TEXT NOT NULL,expires_at INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,used INTEGER NOT NULL DEFAULT 0)''')
+ reset_columns={row[1] for row in c.execute('PRAGMA table_info(password_resets)')}
+ for col in ('channel','destination'):
+  if col not in reset_columns:c.execute('ALTER TABLE password_resets ADD COLUMN '+col+' TEXT DEFAULT NULL')
  c.commit();c.close()
 
-def send_reset(channel,destination,code):
- if channel=='email':
-  host=os.environ.get('SMTP_HOST');sender=os.environ.get('SMTP_FROM')
-  if not (host and sender and os.environ.get('SMTP_USER') and os.environ.get('SMTP_PASSWORD')):return False
-  msg=EmailMessage();msg['Subject']='إحكام: رمز استعادة كلمة المرور';msg['From']=sender;msg['To']=destination
-  msg.set_content('رمز إعادة تعيين كلمة المرور: '+code+'\nصالح لمدة 10 دقائق. لا تشاركه مع أحد.')
-  with smtplib.SMTP(host,int(os.environ.get('SMTP_PORT','587')),timeout=12) as smtp:
-   smtp.starttls(context=ssl.create_default_context());smtp.login(os.environ['SMTP_USER'],os.environ['SMTP_PASSWORD']);smtp.send_message(msg)
-  return True
- if channel=='sms':
-  sid=os.environ.get('TWILIO_ACCOUNT_SID');auth=os.environ.get('TWILIO_AUTH_TOKEN');from_number=os.environ.get('TWILIO_FROM_NUMBER')
-  if not (sid and auth and from_number):return False
-  data=urllib.parse.urlencode({'To':destination,'From':from_number,'Body':'EHKAM password reset code: '+code+' (valid 10 minutes)'}).encode()
-  url='https://api.twilio.com/2010-04-01/Accounts/'+sid+'/Messages.json'
-  req=urllib.request.Request(url,data=data,method='POST');req.add_header('Authorization','Basic '+base64.b64encode((sid+':'+auth).encode()).decode())
-  with urllib.request.urlopen(req,timeout=12) as resp:return 200<=resp.status<300
- return False
+def bird_recipient(channel, destination):
+ if channel == 'email':
+  return {'email_address': destination}
+ if channel == 'sms' and re.fullmatch(r'\+(?:20|966)[0-9]{8,10}', destination):
+  return {'phone_number': destination}
+ raise ValueError('Invalid verification recipient')
+
+def bird_verify_api(endpoint, payload):
+ """Bird Verify regional HTTPS API. Never log API keys, codes or phone numbers."""
+ key=os.environ.get('BIRD_API_KEY','').strip()
+ if not key:raise RuntimeError('BIRD_API_KEY is missing')
+ if key.startswith('bk_eu1_'):region='eu1'
+ elif key.startswith('bk_us1_'):region='us1'
+ else:raise RuntimeError('Bird key region is not recognized')
+ url=f'https://{region}.platform.bird.com/v1/verify/verifications'+endpoint
+ body=json.dumps(payload,separators=(',',':')).encode('utf-8')
+ req=urllib.request.Request(url,body,method='POST',headers={
+  'Authorization':'Bearer '+key,'Content-Type':'application/json','Accept':'application/json'
+ })
+ with urllib.request.urlopen(req,timeout=15) as resp:
+  result=json.load(resp)
+ return result
+
+def bird_send_reset(channel,destination):
+ payload={'to':bird_recipient(channel,destination)}
+ if channel=='sms':payload['options']={'channels':['sms']}
+ result=bird_verify_api('',payload)
+ return result.get('status') in ('pending','verified')
+
+def bird_check_reset(channel,destination,code):
+ result=bird_verify_api('/check',{'to':bird_recipient(channel,destination),'code':code})
+ return result.get('success') is True
 
 def clean_contacts(d):
  country=str(d.get('phone_country') or '+966');local=re.sub(r'[^0-9]','',str(d.get('phone_local') or ''))
@@ -207,14 +225,14 @@ class Handler(BaseHTTPRequestHandler):
     if not e:return self.write(generic)
     destination=e['email'] if channel=='email' else (str(e['phone_country'] or '')+str(e['phone_local'] or '') if e['phone_local'] else '')
     if not destination:return self.write(generic)
-    if channel=='email' and not all(os.environ.get(x) for x in ('SMTP_HOST','SMTP_FROM','SMTP_USER','SMTP_PASSWORD')):fail('خدمة إرسال البريد لم تُضبط بعد؛ تواصل مع الإدارة',503)
-    if channel=='sms' and not all(os.environ.get(x) for x in ('TWILIO_ACCOUNT_SID','TWILIO_AUTH_TOKEN','TWILIO_FROM_NUMBER')):fail('خدمة SMS لم تُضبط بعد؛ تواصل مع الإدارة',503)
-    code=str(secrets.randbelow(1000000)).zfill(6);tokenhash=hashlib.sha256((username+':'+code).encode()).hexdigest()
-    try:sent=send_reset(channel,destination,code)
+    if not os.environ.get('BIRD_API_KEY'):fail('خدمة الاستعادة لم تُضبط بعد؛ تواصل مع الإدارة',503)
+    try:sent=bird_send_reset(channel,destination)
     except Exception:sent=False
-    if not sent:fail('تعذر إرسال الرمز حاليًا؛ حاول لاحقًا',503)
+    if not sent:fail('تعذر إرسال الرمز حاليًا؛ تحقق من تفعيل الخدمة في Bird',503)
     c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
-    c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at) VALUES(?,?,?)',(u['id'],tokenhash,current+600));c.commit()
+    c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at,channel,destination) VALUES(?,?,?,?,?)',
+      (u['id'],'bird-managed',current+600,channel,destination))
+    c.commit()
     return self.write(generic)
    if method=='POST' and path=='/api/password/confirm':
     d=self.input();username=str(d.get('username','')).strip();code=str(d.get('code','')).strip();password=str(d.get('new_password',''))
@@ -223,9 +241,11 @@ class Handler(BaseHTTPRequestHandler):
     if not u:fail('الرمز غير صحيح أو منتهي',400)
     r=c.execute('SELECT * FROM password_resets WHERE user_id=? AND used=0 ORDER BY id DESC LIMIT 1',(u['id'],)).fetchone()
     if not r or r['expires_at']<int(time.time()) or r['attempts']>=5:fail('الرمز غير صحيح أو منتهي')
-    c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],))
-    expected=hashlib.sha256((username+':'+code).encode()).hexdigest()
-    if not hmac.compare_digest(expected,r['code_hash']):c.commit();fail('الرمز غير صحيح أو منتهي')
+    if not r['channel'] or not r['destination']:fail('الرمز غير صحيح أو منتهي')
+    c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],));c.commit()
+    try:valid=bird_check_reset(r['channel'],r['destination'],code)
+    except Exception:valid=False
+    if not valid:fail('الرمز غير صحيح أو منتهي')
     c.execute('UPDATE users SET password_hash=? WHERE id=?',(hashpw(password),u['id']))
     c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
     record(c,u,'password_reset','user',u['id']);c.commit();return self.write({'ok':True})
