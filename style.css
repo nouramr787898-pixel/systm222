@@ -3,3 +3,29 @@
 
 .login-card{width:min(510px,100%)}.login-logo{display:block;width:min(290px,80%);height:auto;margin:0 auto 5px}.brand-icon-img{width:44px;height:44px;border-radius:12px;background:white;padding:4px;object-fit:contain}.role-choices{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin:18px 0}.role-option{cursor:pointer;position:relative}.role-option input{position:absolute;opacity:0;width:1px;height:1px}.role-option span{display:block;border:1px solid #d8e3db;border-radius:12px;padding:13px 6px;text-align:center;font-size:14px;font-weight:800;background:#f8faf8}.role-option input:checked+span{border-color:#00513a;color:#00513a;background:#e9f3ed;box-shadow:inset 0 0 0 1px #00513a}.role-option input:focus-visible+span{outline:3px solid #c6aa62;outline-offset:2px}
 .profile-hero{display:flex;gap:22px;align-items:center;flex-wrap:wrap}.profile-photo{width:96px;height:96px;object-fit:cover;border-radius:16px;background:#f7f7f7;border:2px solid #c6aa62}.table-avatar{height:32px;width:32px;object-fit:cover;border-radius:50%;vertical-align:middle;margin-inline-end:8px}#photoUpload{display:block;margin:12px 0}
+
+/* Employee recovery: centered segmented access code, EHKAM brand */
+#modal:has(.otp-card){width:min(490px,95vw);padding:26px 24px;border-radius:24px}
+.otp-card{text-align:center;padding:10px 0 6px}
+.otp-card h2{font-size:23px;color:var(--dark);margin:8px 0}
+.otp-card>p{font-size:13px;color:var(--muted);line-height:1.9;margin:6px 0 26px}
+.otp-symbol{width:56px;height:56px;border-radius:18px;background:#eaf5ef;color:var(--green);font-size:28px;display:grid;place-items:center;margin:8px auto 16px}
+.otp-slots{display:flex;justify-content:center;gap:8px;margin:25px auto 15px}
+.otp-digit{width:48px;height:58px;min-width:0;flex:0 1 48px;text-align:center;font-size:24px;font-weight:750;border-radius:12px;border:1.5px solid #cadbd3;background:#fff;direction:ltr;padding:0;box-shadow:0 3px 9px #04271b08}
+.otp-digit:focus{border-color:var(--green);box-shadow:0 0 0 4px #0c765024}
+.otp-card .otp-footnote{font-size:11px;margin:10px 0 20px}
+.otp-full{width:100%;padding:13px;margin-top:8px}
+.otp-full:disabled{opacity:.5;cursor:not-allowed}
+.otp-resend{font-size:12px;color:var(--muted);margin-top:21px}
+.otp-text-btn{background:none;border:0;color:var(--green);font-weight:700;cursor:pointer;padding:6px}
+.otp-text-btn:disabled{opacity:.6}
+.otp-error{margin:13px 0;padding:10px;background:#fff0ec;color:#a53b31;border-radius:9px;font-size:12px}
+.otp-password-form{text-align:start;display:grid;gap:14px}
+.otp-password-form label{font-size:13px}
+.otp-spinner{margin:28px auto 18px;width:78px;height:78px;border-radius:50%;border:5px solid #e4f0e9;border-top-color:var(--green);display:grid;place-items:center;animation:otp-spin 1s linear infinite}
+.otp-spinner span{font-size:24px;color:var(--gold);animation:otp-spin 1s linear infinite reverse}
+.otp-wait{min-height:230px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.otp-done{background:#dcf5e7}
+@keyframes otp-spin{to{transform:rotate(360deg)}}
+@media(max-width:420px){.otp-slots{gap:5px}.otp-digit{height:53px;font-size:20px}#modal:has(.otp-card){padding:16px}}
+@media(prefers-reduced-motion:reduce){.otp-spinner,.otp-spinner span{animation:none}}
