@@ -55,18 +55,43 @@ def init():
   if col not in reset_columns:c.execute('ALTER TABLE password_resets ADD COLUMN '+col+' TEXT DEFAULT NULL')
  c.commit();c.close()
 
+class AuthevoServiceError(Exception):
+ def __init__(self,code,status=None):
+  self.code=code;self.status=status
+
 def authevo_api(endpoint,payload):
  """Server-only Authevo access. Never expose the secret or verification code."""
  key=os.environ.get('AUTHEVO_API_KEY','').strip()
- if not key.startswith('sk_'):raise RuntimeError('Authevo key is not configured')
+ if not key.startswith('sk_'):
+  print('AUTHEVO send/verify ERROR: NOT_CONFIGURED',flush=True)
+  raise AuthevoServiceError('NOT_CONFIGURED')
  req=urllib.request.Request('https://api.authevo.dev'+endpoint,json.dumps(payload).encode(),method='POST',headers={
   'Authorization':'Bearer '+key,'Content-Type':'application/json','Accept':'application/json'})
- with urllib.request.urlopen(req,timeout=20) as resp:return json.load(resp)
+ try:
+  with urllib.request.urlopen(req,timeout=20) as resp:
+   data=json.load(resp)
+   if not isinstance(data,dict):raise AuthevoServiceError('INVALID_RESPONSE')
+   return data
+ except urllib.error.HTTPError as error:
+  try:
+   body=json.loads(error.read(8192).decode('utf-8'))
+   rawcode=(body.get('error') or {}).get('code','HTTP_ERROR') if isinstance(body,dict) else 'HTTP_ERROR'
+  except (ValueError,UnicodeDecodeError,AttributeError):rawcode='HTTP_ERROR'
+  error_code=re.sub(r'[^A-Z0-9_]', '',str(rawcode).upper())[:64] or 'HTTP_ERROR'
+  print(f'AUTHEVO API ERROR endpoint={endpoint} status={error.code} code={error_code}',flush=True)
+  raise AuthevoServiceError(error_code,error.code) from None
+ except (urllib.error.URLError,TimeoutError) as error:
+  print(f'AUTHEVO API NETWORK ERROR endpoint={endpoint} category={type(error).__name__}',flush=True)
+  raise AuthevoServiceError('NETWORK_ERROR') from None
+
 
 def whatsapp_send_reset(destination):
  result=authevo_api('/v1/otp/send',{'phone':destination,'language':'ar'})
  data=result.get('data') or {}
- return data.get('status')=='sent' and bool(data.get('message_id'))
+ if data.get('status')!='sent' or not data.get('message_id'):
+  print('AUTHEVO API invalid send response: missing accepted status or message id',flush=True)
+  return False
+ return True
 
 def whatsapp_check_reset(destination,code):
  result=authevo_api('/v1/otp/verify',{'phone':destination,'code':code})
