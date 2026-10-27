@@ -28,7 +28,7 @@ def conn():
 
 def init():
  c=conn();c.executescript('''
- CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL, name_en TEXT DEFAULT '',contract_end TEXT,city TEXT DEFAULT '', archived INTEGER NOT NULL DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL, name_en TEXT DEFAULT '',contract_end TEXT,city TEXT DEFAULT '', address TEXT DEFAULT '', latitude REAL, longitude REAL, geofence_radius REAL NOT NULL DEFAULT 100, archived INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','manager','employee')),employee_id INTEGER,company_id INTEGER);
  CREATE TABLE IF NOT EXISTS employees(id INTEGER PRIMARY KEY,company_id INTEGER NOT NULL REFERENCES companies(id),name TEXT NOT NULL,name_en TEXT DEFAULT '',employee_no TEXT NOT NULL, identity_no TEXT DEFAULT '',job TEXT DEFAULT '',department TEXT DEFAULT '',manager_id INTEGER, status TEXT NOT NULL DEFAULT 'نشط',hire_date TEXT, contract_start TEXT,contract_end TEXT,basic REAL NOT NULL DEFAULT 0,housing REAL NOT NULL DEFAULT 0,transport REAL NOT NULL DEFAULT 0,other REAL NOT NULL DEFAULT 0,annual_entitlement REAL NOT NULL DEFAULT 21,carryover REAL NOT NULL DEFAULT 0,monthly_grant REAL NOT NULL DEFAULT 0,workweek TEXT NOT NULL DEFAULT '0,1,2,3,5,6', work_start TEXT NOT NULL DEFAULT '09:00',work_end TEXT NOT NULL DEFAULT '17:00',payment_method TEXT NOT NULL DEFAULT 'bank',archived INTEGER NOT NULL DEFAULT 0,UNIQUE(company_id,employee_no));
  CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY,company_id INTEGER NOT NULL,employee_id INTEGER NOT NULL,type TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'new',start_date TEXT,end_date TEXT,days REAL DEFAULT 0,amount REAL DEFAULT 0,installment REAL DEFAULT 0,reason TEXT DEFAULT '',notes TEXT DEFAULT '',created_by INTEGER NOT NULL,approver_id INTEGER,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,decision_note TEXT DEFAULT '');
@@ -44,6 +44,12 @@ def init():
   for username,pw,role,eid in [('admin','Admin@123','admin',None),('manager','Manager@123','manager',1),('employee','Employee@123','employee',2)]:
    c.execute('INSERT INTO users(username,password_hash,role,employee_id,company_id) VALUES(?,?,?,?,?)',(username,hashpw(pw),role,eid,co if role!='admin' else None))
 
+ # Add company geofence fields to older installations safely.
+ company_columns={row[1] for row in c.execute('PRAGMA table_info(companies)')}
+ for col,decl in (('address',"TEXT DEFAULT ''"),('latitude','REAL'),('longitude','REAL'),('geofence_radius','REAL NOT NULL DEFAULT 100')):
+  if col not in company_columns:c.execute('ALTER TABLE companies ADD COLUMN '+col+' '+decl)
+ # The supplied Google Maps pin is a TEST location for the sample company only.
+ c.execute("UPDATE companies SET address=CASE WHEN address='' THEN 'موقع تجريبي من رابط Google Maps' ELSE address END, latitude=COALESCE(latitude,30.1390381), longitude=COALESCE(longitude,31.2558794), geofence_radius=CASE WHEN geofence_radius IS NULL OR geofence_radius<=0 THEN 100 ELSE geofence_radius END WHERE name='شركة الأفق' AND latitude IS NULL AND longitude IS NULL")
  # Add employee profile photo column to older installations safely.
  columns={row[1] for row in c.execute('PRAGMA table_info(employees)')}
  if 'photo' not in columns:c.execute('ALTER TABLE employees ADD COLUMN photo TEXT DEFAULT NULL')
@@ -400,7 +406,15 @@ class Handler(BaseHTTPRequestHandler):
     if u['role']!='admin':fail('غير مصرح',403)
     d=self.input();name=str(d.get('name','')).strip()
     if not name:fail('اسم الشركة مطلوب')
-    cursor=c.execute('INSERT INTO companies(name,name_en,contract_end,city) VALUES(?,?,?,?)',(name,d.get('name_en',''),d.get('contract_end'),d.get('city','')))
+    try:
+     lat=float(d.get('latitude')) if str(d.get('latitude','')).strip() else None
+     lon=float(d.get('longitude')) if str(d.get('longitude','')).strip() else None
+     radius=float(d.get('geofence_radius') or 100)
+    except (TypeError,ValueError):fail('إحداثيات الموقع أو نطاق البصمة غير صحيحة')
+    if lat is None or lon is None:fail('تحديد خط العرض وخط الطول مطلوب لتفعيل البصمة الجغرافية')
+    if not (-90<=lat<=90 and -180<=lon<=180):fail('إحداثيات الموقع خارج النطاق الصحيح')
+    if not (20<=radius<=1000):fail('نطاق البصمة يجب أن يكون بين 20 و1000 متر')
+    cursor=c.execute('INSERT INTO companies(name,name_en,contract_end,city,address,latitude,longitude,geofence_radius) VALUES(?,?,?,?,?,?,?,?)',(name,d.get('name_en',''),d.get('contract_end'),d.get('city',''),d.get('address',''),lat,lon,radius))
     record(c,u,'create','company',cursor.lastrowid,name);c.commit();return self.write({'ok':True},201)
    if path=='/api/employees' and method=='GET':return self.write(visible_employees(c,u,True))
    if path=='/api/employees' and method=='POST':
@@ -493,8 +507,35 @@ class Handler(BaseHTTPRequestHandler):
     return self.write([dict(x) for x in c.execute(q+' ORDER BY day DESC',p)])
    if path=='/api/attendance' and method=='POST':
     if u['role']!='employee':fail('تسجيل البصمة من حساب الموظف فقط',403)
-    # IMPORTANT no trusted geolocation validation in this prototype. Restrict endpoint rather than imply location check.
-    fail('تسجيل البصمة الجغرافية مغلق حتى تفعيل تحقق الموقع من الخادم',501)
+    if not u['employee_id']:fail('حساب الموظف غير مرتبط بملف وظيفي',403)
+    d=self.input()
+    try:
+     lat=float(d.get('latitude'));lon=float(d.get('longitude'));accuracy=float(d.get('accuracy',9999))
+    except (TypeError,ValueError):fail('تعذر قراءة الموقع الجغرافي من الجهاز')
+    if not (-90<=lat<=90 and -180<=lon<=180):fail('إحداثيات الموقع غير صحيحة')
+    if accuracy<0 or accuracy>100:fail('دقة الموقع ضعيفة. شغّل GPS وحاول مرة أخرى في مكان مفتوح')
+    e=c.execute('SELECT e.*,co.latitude company_lat,co.longitude company_lon,co.geofence_radius,co.address company_address FROM employees e JOIN companies co ON co.id=e.company_id WHERE e.id=? AND e.archived=0 AND co.archived=0',(u['employee_id'],)).fetchone()
+    if not e:fail('ملف الموظف أو الشركة غير متاح',403)
+    if e['company_lat'] is None or e['company_lon'] is None:fail('لم يحدد المدير موقع الشركة بعد')
+    import math
+    r=6371000.0
+    p1=math.radians(lat);p2=math.radians(float(e['company_lat']))
+    dp=math.radians(float(e['company_lat'])-lat);dl=math.radians(float(e['company_lon'])-lon)
+    a=math.sin(dp/2)**2+math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    distance=2*r*math.asin(min(1,math.sqrt(a)))
+    radius=float(e['geofence_radius'] or 100)
+    if distance>radius:fail('أنت خارج نطاق البصمة المسموح. المسافة التقريبية '+str(round(distance))+' متر؛ النطاق '+str(round(radius))+' متر.')
+    day=TODAY().isoformat();stamp=datetime.datetime.now().strftime('%H:%M:%S')
+    row=c.execute('SELECT * FROM attendance WHERE employee_id=? AND day=?',(e['id'],day)).fetchone()
+    if not row:
+     c.execute('INSERT INTO attendance(employee_id,day,check_in,source) VALUES(?,?,?,?)',(e['id'],day,stamp,'gps_geofence'))
+     action='check_in';message='تم تسجيل الحضور بنجاح'
+    elif not row['check_out']:
+     c.execute('UPDATE attendance SET check_out=?,source=? WHERE id=?',(stamp,'gps_geofence',row['id']))
+     action='check_out';message='تم تسجيل الانصراف بنجاح'
+    else:fail('تم تسجيل الحضور والانصراف لهذا اليوم بالفعل')
+    record(c,u,action,'attendance',e['id'],'distance_m='+str(round(distance,1))+'; accuracy_m='+str(round(accuracy,1)))
+    c.commit();return self.write({'ok':True,'action':action,'message':message,'distance_m':round(distance,1),'radius_m':radius,'time':stamp})
    if path=='/api/archive/history' and method=='GET':
     if u['role']!='admin':fail('غير مصرح',403)
     rows=c.execute("SELECT username,action,entity,entity_id,timestamp FROM audit WHERE action IN ('archive','restore') ORDER BY id DESC LIMIT 100").fetchall()
