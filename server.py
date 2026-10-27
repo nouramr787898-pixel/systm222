@@ -60,76 +60,29 @@ class AuthevoServiceError(Exception):
   self.code=code;self.status=status
 
 # Only log machine-readable error identifiers, never response messages or PII.
-def authevo_error_code(body):
- if not isinstance(body,dict):return 'HTTP_ERROR'
- candidates=[body.get('code'),body.get('error_code')]
- error=body.get('error')
- if isinstance(error,dict):
-  candidates.extend((error.get('code'),error.get('error_code'),error.get('type')))
- elif isinstance(error,str):
-  candidates.append(error)
- for value in candidates:
-  if not isinstance(value,str):continue
-  value=value.strip()
-  # Do not accidentally print arbitrary error messages, phones, keys or IDs.
-  if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{2,63}',value):return value.upper()
- return 'HTTP_ERROR'
-
-def authevo_api(endpoint,payload):
- """Server-side only; never log the key, phone number, OTP or raw provider response."""
- key=os.environ.get('AUTHEVO_API_KEY','').strip()
- if not key.startswith('sk_'):
-  print('AUTHEVO API ERROR code=NOT_CONFIGURED',flush=True)
-  raise AuthevoServiceError('NOT_CONFIGURED')
- req=urllib.request.Request('https://api.authevo.dev'+endpoint,json.dumps(payload).encode(),method='POST',headers={
-  'Authorization':'Bearer '+key,'Content-Type':'application/json','Accept':'application/json'})
+def resend_send_reset(destination,code):
+ """Send only from server; never expose email API key or OTP in logs."""
+ key=os.environ.get('RESEND_API_KEY','').strip()
+ sender=os.environ.get('RESEND_FROM_EMAIL','').strip()
+ if not key.startswith('re_') or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',sender):
+  raise RuntimeError('RESEND_NOT_CONFIGURED')
+ subject='رمز استعادة كلمة المرور — إحكام الأعمال'
+ content=('رمز استعادة كلمة المرور الخاص بحسابك هو: '+code+'\n'
+          'هذا الرمز صالح لمدة 10 دقائق. لا تشاركه مع أي شخص.\n'
+          'إذا لم تطلب استعادة كلمة المرور، تجاهل هذه الرسالة.')
+ payload={'from':'إحكام الأعمال <'+sender+'>','to':[destination], 'subject':subject, 'text':content}
+ req=urllib.request.Request('https://api.resend.com/emails',data=json.dumps(payload,ensure_ascii=False).encode('utf-8'),
+     headers={'Authorization':'Bearer '+key,'Content-Type':'application/json','Accept':'application/json'},method='POST')
  try:
-  with urllib.request.urlopen(req,timeout=20) as resp:
-   data=json.load(resp)
-   if not isinstance(data,dict):raise AuthevoServiceError('INVALID_RESPONSE')
-   return data
+  with urllib.request.urlopen(req,timeout=20) as response:
+   result=json.load(response)
+   return bool(isinstance(result,dict) and result.get('id'))
  except urllib.error.HTTPError as error:
-  # Provider errors sometimes arrive as HTML/plain text (e.g. a gateway 403).
-  # Record *only* safe metadata, never the response body, credentials or recipient.
-  raw=error.read(8192)
-  content_type=(error.headers.get('Content-Type','') or '').lower().split(';',1)[0].strip()
-  if content_type not in ('application/json','application/problem+json','text/html','text/plain'):
-   content_type='other'
-  try:
-   body=json.loads(raw.decode('utf-8'))
-   response_format='json' if isinstance(body,dict) else 'json_other'
-  except (ValueError,UnicodeDecodeError):
-   body={}
-   response_format='html' if raw.lstrip().lower().startswith((b'<!doctype html',b'<html')) else 'non_json'
-  code=authevo_error_code(body)
-  # The JSON shape may explain why a machine code cannot be read.
-  # Fixed vocabulary only: never copy arbitrary keys, values, URLs or messages to logs.
-  shape='none'
-  if isinstance(body,dict):
-   if isinstance(body.get('error'),dict):shape='nested_error_object'
-   elif isinstance(body.get('error'),str):shape='error_string'
-   elif isinstance(body.get('errors'),list):shape='errors_list'
-   elif 'message' in body:shape='message_only'
-   else:shape='other_object'
-  print(f'AUTHEVO API ERROR endpoint={endpoint} status={error.code} code={code} '
-        f'format={response_format} content_type={content_type} shape={shape}',flush=True)
-  raise AuthevoServiceError(code,error.code) from None
- except (urllib.error.URLError,TimeoutError) as error:
-  print(f'AUTHEVO API NETWORK ERROR endpoint={endpoint} category={type(error).__name__}',flush=True)
-  raise AuthevoServiceError('NETWORK_ERROR') from None
-
-
-def whatsapp_send_reset(destination):
- result=authevo_api('/v1/otp/send',{'phone':destination,'language':'ar'})
- data=result.get('data') or {}
- if data.get('status')!='sent' or not data.get('message_id'):
-  print('AUTHEVO API invalid send response: missing accepted status or message id',flush=True)
+  print('RESEND SEND ERROR http_status='+str(error.code),flush=True)
   return False
- return True
-
-def whatsapp_check_reset(destination,code):
- result=authevo_api('/v1/otp/verify',{'phone':destination,'code':code})
- return (result.get('data') or {}).get('verified') is True
+ except (urllib.error.URLError,TimeoutError,ValueError):
+  print('RESEND SEND ERROR connection_or_response',flush=True)
+  return False
 
 def clean_contacts(d):
  country=str(d.get('phone_country') or '+966');local=re.sub(r'[^0-9]','',str(d.get('phone_local') or ''))
@@ -255,45 +208,38 @@ class Handler(BaseHTTPRequestHandler):
     return self.write({'ok':True},headers={'Set-Cookie':'ehkam_session='+token+'; HttpOnly; SameSite=Strict; Path=/'})
    if method=='POST' and path=='/api/password/request':
     d=self.input();username=str(d.get('username','')).strip();channel=d.get('channel');ip=self.client_address[0]
-    if channel!='whatsapp' or not username:fail('استعادة كلمة المرور متاحة عبر واتساب فقط')
-    key=(ip,username);current=int(time.time())
+    if channel!='email' or not username:fail('استعادة كلمة المرور متاحة عبر البريد الإلكتروني فقط')
+    current=int(time.time());key=(ip,username)
     with LOCK:
      timestamps=[t for t in RESET_ATTEMPTS.get(key,[]) if current-t<3600]
      if len(timestamps)>=5:fail('محاولات كثيرة؛ حاول لاحقًا',429)
      timestamps.append(current);RESET_ATTEMPTS[key]=timestamps
+    generic={'message':'إذا كان الحساب موجودًا وله بريد مسجّل، سيصلك رمز الاستعادة.'}
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
-    generic={'message':'إذا كان الحساب موجودًا ووسيلة التواصل مفعلة، سيصلك رمز الاستعادة.'}
     if not u:return self.write(generic)
-    e=c.execute('SELECT phone_country,phone_local FROM employees WHERE id=?',(u['employee_id'],)).fetchone()
-    if not e:return self.write(generic)
-    destination=(str(e['phone_country'] or '')+str(e['phone_local'] or '') if e['phone_local'] else '')
-    if not destination:return self.write(generic)
-    if not os.environ.get('AUTHEVO_API_KEY'):fail('خدمة واتساب لم تُضبط بعد؛ تواصل مع الإدارة',503)
-    try:sent=whatsapp_send_reset(destination)
-    except Exception:sent=False
-    if not sent:fail('تعذر إرسال رمز واتساب حاليًا؛ تحقق من إعداد Authevo ورصيد الخدمة',503)
+    e=c.execute('SELECT email FROM employees WHERE id=?',(u['employee_id'],)).fetchone()
+    destination=str(e['email'] or '').strip().lower() if e else ''
+    if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',destination):return self.write(generic)
+    code=f'{secrets.randbelow(1000000):06d}'
+    sent=resend_send_reset(destination,code)
+    if not sent:fail('تعذر إرسال البريد حاليًا؛ راجع إعداد Resend أو سجلات Railway',503)
     c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
     c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at,channel,destination) VALUES(?,?,?,?,?)',
-      (u['id'],'authevo-managed',current+600,channel,destination))
-    c.commit()
-    return self.write(generic)
+      (u['id'],hashpw(code),current+600,'email',destination))
+    c.commit();return self.write(generic)
    if method=='POST' and path=='/api/password/verify':
     d=self.input();username=str(d.get('username','')).strip();code=str(d.get('code','')).strip()
     if not re.fullmatch(r'\d{6}',code):fail('رمز التحقق غير صحيح',400)
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
     if not u:fail('رمز التحقق غير صحيح أو منتهي',400)
     r=c.execute('SELECT * FROM password_resets WHERE user_id=? AND used=0 ORDER BY id DESC LIMIT 1',(u['id'],)).fetchone()
-    if not r or r['expires_at']<int(time.time()) or r['attempts']>=5 or not r['channel'] or not r['destination']:
+    if not r or r['expires_at']<int(time.time()) or r['attempts']>=5 or r['channel']!='email' or not r['code_hash']:
      fail('رمز التحقق غير صحيح أو منتهي',400)
-    # Burn an attempt BEFORE contacting the verification provider, even on provider failure.
     c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],));c.commit()
-    try:valid=(r['channel']=='whatsapp' and whatsapp_check_reset(r['destination'],code))
-    except Exception:valid=False
-    if not valid:fail('رمز التحقق غير صحيح أو منتهي',400)
+    if not verifypw(code,r['code_hash']):fail('رمز التحقق غير صحيح أو منتهي',400)
     grant=secrets.token_urlsafe(48)
     c.execute('UPDATE password_resets SET verified_token_hash=? WHERE id=?',(hashlib.sha256(grant.encode()).hexdigest(),r['id']))
-    c.commit()
-    return self.write({'ok':True,'reset_token':grant})
+    c.commit();return self.write({'ok':True,'reset_token':grant})
    if method=='POST' and path=='/api/password/confirm':
     d=self.input();username=str(d.get('username','')).strip();password=str(d.get('new_password',''))
     grant=str(d.get('reset_token',''))
