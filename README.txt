@@ -1,6 +1,3 @@
-EHKAM - Authevo 403 diagnostic update
-Replace ONLY server.py in GitHub root. Do NOT upload secret keys.
-After Railway ACTIVE, make one test attempt and inspect Deploy Logs for:
-AUTHEVO API ERROR endpoint=/v1/otp/send status=403 code=...
-Only symbolic error codes are logged, not raw body, numbers, OTP or keys.
-This diagnoses the error; it does not guarantee WhatsApp delivery.
+EHKAM Authevo 403 diagnostics
+
+Replace only server.py in GitHub and commit. Do not upload any API key. On Railway, after deployment, perform one test request and read Deploy Logs for the AUTHEVO API ERROR line. The new format/content_type/shape fields are deliberately limited to non-sensitive metadata. Do not share your secret key, phone number or OTP.

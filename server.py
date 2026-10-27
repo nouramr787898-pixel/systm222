@@ -89,11 +89,30 @@ def authevo_api(endpoint,payload):
    if not isinstance(data,dict):raise AuthevoServiceError('INVALID_RESPONSE')
    return data
  except urllib.error.HTTPError as error:
+  # Provider errors sometimes arrive as HTML/plain text (e.g. a gateway 403).
+  # Record *only* safe metadata, never the response body, credentials or recipient.
+  raw=error.read(8192)
+  content_type=(error.headers.get('Content-Type','') or '').lower().split(';',1)[0].strip()
+  if content_type not in ('application/json','application/problem+json','text/html','text/plain'):
+   content_type='other'
   try:
-   body=json.loads(error.read(8192).decode('utf-8'))
-  except (ValueError,UnicodeDecodeError):body={}
+   body=json.loads(raw.decode('utf-8'))
+   response_format='json' if isinstance(body,dict) else 'json_other'
+  except (ValueError,UnicodeDecodeError):
+   body={}
+   response_format='html' if raw.lstrip().lower().startswith((b'<!doctype html',b'<html')) else 'non_json'
   code=authevo_error_code(body)
-  print(f'AUTHEVO API ERROR endpoint={endpoint} status={error.code} code={code}',flush=True)
+  # The JSON shape may explain why a machine code cannot be read.
+  # Fixed vocabulary only: never copy arbitrary keys, values, URLs or messages to logs.
+  shape='none'
+  if isinstance(body,dict):
+   if isinstance(body.get('error'),dict):shape='nested_error_object'
+   elif isinstance(body.get('error'),str):shape='error_string'
+   elif isinstance(body.get('errors'),list):shape='errors_list'
+   elif 'message' in body:shape='message_only'
+   else:shape='other_object'
+  print(f'AUTHEVO API ERROR endpoint={endpoint} status={error.code} code={code} '
+        f'format={response_format} content_type={content_type} shape={shape}',flush=True)
   raise AuthevoServiceError(code,error.code) from None
  except (urllib.error.URLError,TimeoutError) as error:
   print(f'AUTHEVO API NETWORK ERROR endpoint={endpoint} category={type(error).__name__}',flush=True)
