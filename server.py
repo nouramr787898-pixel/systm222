@@ -1,7 +1,7 @@
 """EHKAM HR Portal - local functional prototype. Run: python server.py"""
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import hr, sys, calendar
+import hr, sys, calendar, gps_location
 import sqlite3, json, os, hashlib, hmac, secrets, datetime, csv, io, threading, re, time, ssl, smtplib, urllib.request, urllib.parse, urllib.error, base64, html, math
 from email.message import EmailMessage
 from http.cookies import SimpleCookie
@@ -93,7 +93,7 @@ def init(seeder=None,allow_create=False):
 
  # Add company geofence fields to older installations safely.
  company_columns={row[1] for row in c.execute('PRAGMA table_info(companies)')}
- for col,decl in (('address',"TEXT DEFAULT ''"),('latitude','REAL'),('longitude','REAL'),('geofence_radius','REAL NOT NULL DEFAULT 100')):
+ for col,decl in (('gps_url',"TEXT NOT NULL DEFAULT ''"),('address',"TEXT DEFAULT ''"),('latitude','REAL'),('longitude','REAL'),('geofence_radius','REAL NOT NULL DEFAULT 100')):
   if col not in company_columns:c.execute('ALTER TABLE companies ADD COLUMN '+col+' '+decl)
  # Add employee profile photo column to older installations safely.
  columns={row[1] for row in c.execute('PRAGMA table_info(employees)')}
@@ -593,19 +593,30 @@ class Handler(BaseHTTPRequestHandler):
     if u['role']!='admin':fail('غير مصرح',403)
     d=self.input();name=str(d.get('name','')).strip()
     if not name:fail('اسم الشركة مطلوب')
+    previous=c.execute('SELECT * FROM companies WHERE id=?',(int(path.rsplit('/',1)[1]),)).fetchone() if path!='/api/companies' else None
+    gps=str(d.get('gps_url',previous['gps_url'] if previous else '') or '').strip()
     try:
-     lat=float(d.get('latitude')) if str(d.get('latitude','')).strip() else None
-     lon=float(d.get('longitude')) if str(d.get('longitude','')).strip() else None
-     radius=float(d.get('geofence_radius') or 100)
+     if gps:
+      if previous and gps==previous['gps_url'] and previous['latitude'] is not None and previous['longitude'] is not None:
+       d.update(latitude=previous['latitude'],longitude=previous['longitude'])
+      else:
+       latitude,longitude=gps_location.resolve(gps);d.update(latitude=latitude,longitude=longitude)
+     elif previous:
+      d.setdefault('latitude',previous['latitude']);d.setdefault('longitude',previous['longitude'])
+    except (gps_location.LocationError,ValueError) as exc:fail(str(exc))
+    try:
+     lat=float(d.get('latitude')) if d.get('latitude') not in (None,'') else None
+     lon=float(d.get('longitude')) if d.get('longitude') not in (None,'') else None
+     radius=float(d.get('geofence_radius') or (previous['geofence_radius'] if previous else 100))
     except (TypeError,ValueError):fail('إحداثيات الموقع أو نطاق البصمة غير صحيحة')
     if (lat is None)!=(lon is None):fail('يجب تحديد إحداثيات الموقع معًا')
     if lat is not None and not (-90<=lat<=90 and -180<=lon<=180):fail('إحداثيات الموقع خارج النطاق الصحيح')
     if not (20<=radius<=1000):fail('نطاق البصمة يجب أن يكون بين 20 و1000 متر')
     if path!='/api/companies':
-     cid=int(path.rsplit('/',1)[1]);changed=c.execute('UPDATE companies SET name=?,name_en=?,contract_end=?,city=?,address=?,latitude=?,longitude=?,geofence_radius=? WHERE id=?',(name,d.get('name_en',''),normalize_date(d.get('contract_end')),d.get('city',''),d.get('address',''),lat,lon,radius,cid))
+     cid=int(path.rsplit('/',1)[1]);changed=c.execute('UPDATE companies SET name=?,name_en=?,contract_end=?,city=?,address=?,latitude=?,longitude=?,geofence_radius=?,gps_url=? WHERE id=?',(name,d.get('name_en',''),normalize_date(d.get('contract_end')),d.get('city',''),d.get('address',''),lat,lon,radius,gps,cid))
      if not changed.rowcount:fail('الشركة غير موجودة',404)
      record(c,u,'update','company',cid,name);c.commit();return self.write({'ok':True})
-    cursor=c.execute('INSERT INTO companies(name,name_en,contract_end,city,address,latitude,longitude,geofence_radius) VALUES(?,?,?,?,?,?,?,?)',(name,d.get('name_en',''),normalize_date(d.get('contract_end')),d.get('city',''),d.get('address',''),lat,lon,radius))
+    cursor=c.execute('INSERT INTO companies(name,name_en,contract_end,city,address,latitude,longitude,geofence_radius,gps_url) VALUES(?,?,?,?,?,?,?,?,?)',(name,d.get('name_en',''),normalize_date(d.get('contract_end')),d.get('city',''),d.get('address',''),lat,lon,radius,gps))
     record(c,u,'create','company',cursor.lastrowid,name);c.commit();return self.write({'ok':True},201)
    if path=='/api/employees' and method=='GET':return self.write(visible_employees(c,u,True))
    if path=='/api/employees' and method=='POST':

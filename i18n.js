@@ -1,5 +1,14 @@
 // Interface translations. Business data stays in its original language.
 Object.assign(uiEnglish, {
+  "عنوان GPS": "GPS address",
+  "أرشفة": "Archive",
+  "استرجاع": "Restore",
+  "الصق رابط Google Maps لدبوس موقع الشركة لتفعيل التحقق الجغرافي للحضور.": "Paste the Google Maps pin link to enable location verification for attendance.",
+  "رابط Google Maps طويل جدًا": "Google Maps link is too long",
+  "أدخل رابط Google Maps صالحًا يبدأ بـ https://": "Enter a valid Google Maps link starting with https://",
+  "إحداثيات رابط GPS غير صحيحة": "Invalid GPS link coordinates",
+  "تعذر قراءة رابط Google Maps؛ افتحه وانسخ الرابط الكامل الذي يحتوي على إحداثيات الموقع": "Unable to resolve Google Maps link; open it and copy the full link containing location coordinates",
+  "لم نجد إحداثيات دقيقة في الرابط؛ اختر دبوس الموقع وانسخ رابط Google Maps الكامل": "No precise coordinates found; select the location pin and copy the full Google Maps link",
   "إضافة شركة": "Add company",
   "اليوم": "Day",
   "الحضور": "Check-in",

@@ -10,7 +10,7 @@ const {chromium}=require('playwright'),assert=require('node:assert/strict');
  async function nav(key){console.log('screen:',key);await page.locator(`[data-nav=${key}]`).click()}
  async function submit(){await page.locator('#modal [type=submit]').click();await page.locator('#modal').waitFor({state:'hidden'})}
  await login('admin','admin_demo','DemoAdmin@2026');await nav('companies');await page.locator('#addCompany').click();assert.equal(await page.locator('#modal [name=latitude],#modal [name=longitude],#modal [name=geofence_radius]').count(),0);
- await page.locator('#modal [name=name]').fill('شركة اختبار تصميم');await page.locator('[name=address]').fill('عنوان تجريبي');await submit();
+ await page.locator('#modal [name=name]').fill('شركة اختبار تصميم');await page.locator('[name=address]').fill('عنوان تجريبي');await page.locator('[name=gps_url]').fill('https://www.google.com/maps?q=30.1390381,31.2558794');await submit();const companyRows=await (await page.request.get(origin+'/api/companies')).json();const gpsCompany=companyRows.find(c=>c.name==='شركة اختبار تصميم');assert.equal(gpsCompany.latitude,30.1390381);assert.equal(gpsCompany.longitude,31.2558794);
  await nav('employees');await page.locator('#addEmployee').click();assert.equal(await page.locator('[name=login_username]').count(),0);
  await page.locator('[name=name]').fill('موظف اختبار التصميم');await page.locator('[name=login_password]').fill('TestOnly@2026abcdef');
  const birth=page.locator('[name=birth_date]');assert.match(await birth.inputValue(),/^\d{2}\/\d{2}\/\d{4}$/);
