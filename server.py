@@ -55,54 +55,22 @@ def init():
   if col not in reset_columns:c.execute('ALTER TABLE password_resets ADD COLUMN '+col+' TEXT DEFAULT NULL')
  c.commit();c.close()
 
-def bird_recipient(channel, destination):
- if channel == 'email' and re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',destination):
-  return {'email':destination}
- if channel == 'sms' and re.fullmatch(r'\+(?:20|966)[0-9]{8,10}',destination):
-  return {'phone_number':destination}
- raise ValueError('Invalid verification recipient')
-
-def bird_api(endpoint, payload):
- """Bird regional API; secrets and personal data must never be logged."""
- key=os.environ.get('BIRD_API_KEY','').strip()
- if key.startswith('bk_eu1_'):region='eu1'
- elif key.startswith('bk_us1_'):region='us1'
- else:raise RuntimeError('Missing or unsupported Bird API key')
- url=f'https://{region}.platform.bird.com'+endpoint
- req=urllib.request.Request(url,json.dumps(payload).encode('utf-8'),method='POST',headers={
+def authevo_api(endpoint,payload):
+ """Server-only Authevo access. Never expose the secret or verification code."""
+ key=os.environ.get('AUTHEVO_API_KEY','').strip()
+ if not key.startswith('sk_'):raise RuntimeError('Authevo key is not configured')
+ req=urllib.request.Request('https://api.authevo.dev'+endpoint,json.dumps(payload).encode(),method='POST',headers={
   'Authorization':'Bearer '+key,'Content-Type':'application/json','Accept':'application/json'})
- with urllib.request.urlopen(req,timeout=20) as resp:
-  return json.load(resp)
+ with urllib.request.urlopen(req,timeout=20) as resp:return json.load(resp)
 
-def bird_send_reset(channel,destination):
- if channel=='sms':
-  result=bird_api('/v1/verify/verifications',{'to':bird_recipient('sms',destination)})
-  return result.get('status')=='pending',None
- if channel=='email':
-  sender=os.environ.get('BIRD_FROM_EMAIL','').strip()
-  if not sender or not re.fullmatch(r'[^\s@]+@ehkambusiness\.com',sender,re.I):
-   raise RuntimeError('BIRD_FROM_EMAIL not configured')
-  code=f'{secrets.randbelow(1000000):06d}'
-  body='رمز التحقق الخاص باستعادة كلمة المرور في منصة إحكام الأعمال هو: '+code+'. ينتهي الرمز بعد عشر دقائق. لا تشاركه مع أحد.'
-  result=bird_api('/v1/email/messages',{
-    'from':{'email':sender,'name':'إحكام الأعمال'},
-    'to':[destination],'subject':'رمز استعادة كلمة المرور — إحكام الأعمال',
-    'text':body,'category':'transactional'
-  })
-  # Only accept a confirmed Bird submission; acceptance does not prove delivery.
-  if not result.get('id') or result.get('status') not in ('accepted','queued','pending'):
-   return False,None
-  # Store a per-request salted hash, NEVER the 6-digit code itself.
-  return True,hashpw(code)
- raise ValueError('Unknown reset channel')
+def whatsapp_send_reset(destination):
+ result=authevo_api('/v1/otp/send',{'phone':destination,'language':'ar'})
+ data=result.get('data') or {}
+ return data.get('status')=='sent' and bool(data.get('message_id'))
 
-def bird_check_reset(channel,destination,code,stored_hash):
- if channel=='sms':
-  result=bird_api('/v1/verify/verifications/check',{
-    'to':bird_recipient('sms',destination),'code':code})
-  return result.get('success') is True
- if channel=='email':return bool(stored_hash and verifypw(code,stored_hash))
- return False
+def whatsapp_check_reset(destination,code):
+ result=authevo_api('/v1/otp/verify',{'phone':destination,'code':code})
+ return (result.get('data') or {}).get('verified') is True
 
 def clean_contacts(d):
  country=str(d.get('phone_country') or '+966');local=re.sub(r'[^0-9]','',str(d.get('phone_local') or ''))
@@ -228,7 +196,7 @@ class Handler(BaseHTTPRequestHandler):
     return self.write({'ok':True},headers={'Set-Cookie':'ehkam_session='+token+'; HttpOnly; SameSite=Strict; Path=/'})
    if method=='POST' and path=='/api/password/request':
     d=self.input();username=str(d.get('username','')).strip();channel=d.get('channel');ip=self.client_address[0]
-    if channel not in ('email','sms') or not username:fail('حدد وسيلة الاستعادة واسم المستخدم')
+    if channel!='whatsapp' or not username:fail('استعادة كلمة المرور متاحة عبر واتساب فقط')
     key=(ip,username);current=int(time.time())
     with LOCK:
      timestamps=[t for t in RESET_ATTEMPTS.get(key,[]) if current-t<3600]
@@ -237,17 +205,17 @@ class Handler(BaseHTTPRequestHandler):
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
     generic={'message':'إذا كان الحساب موجودًا ووسيلة التواصل مفعلة، سيصلك رمز الاستعادة.'}
     if not u:return self.write(generic)
-    e=c.execute('SELECT phone_country,phone_local,email FROM employees WHERE id=?',(u['employee_id'],)).fetchone()
+    e=c.execute('SELECT phone_country,phone_local FROM employees WHERE id=?',(u['employee_id'],)).fetchone()
     if not e:return self.write(generic)
-    destination=e['email'] if channel=='email' else (str(e['phone_country'] or '')+str(e['phone_local'] or '') if e['phone_local'] else '')
+    destination=(str(e['phone_country'] or '')+str(e['phone_local'] or '') if e['phone_local'] else '')
     if not destination:return self.write(generic)
-    if not os.environ.get('BIRD_API_KEY'):fail('خدمة الاستعادة لم تُضبط بعد؛ تواصل مع الإدارة',503)
-    try:sent,reset_hash=bird_send_reset(channel,destination)
+    if not os.environ.get('AUTHEVO_API_KEY'):fail('خدمة واتساب لم تُضبط بعد؛ تواصل مع الإدارة',503)
+    try:sent=whatsapp_send_reset(destination)
     except Exception:sent=False
-    if not sent:fail('تعذر إرسال الرمز حاليًا؛ تحقق من تفعيل الخدمة في Bird',503)
+    if not sent:fail('تعذر إرسال رمز واتساب حاليًا؛ تحقق من إعداد Authevo ورصيد الخدمة',503)
     c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
     c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at,channel,destination) VALUES(?,?,?,?,?)',
-      (u['id'],reset_hash or 'bird-managed',current+600,channel,destination))
+      (u['id'],'authevo-managed',current+600,channel,destination))
     c.commit()
     return self.write(generic)
    if method=='POST' and path=='/api/password/verify':
@@ -260,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
      fail('رمز التحقق غير صحيح أو منتهي',400)
     # Burn an attempt BEFORE contacting the verification provider, even on provider failure.
     c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],));c.commit()
-    try:valid=bird_check_reset(r['channel'],r['destination'],code,r['code_hash'])
+    try:valid=(r['channel']=='whatsapp' and whatsapp_check_reset(r['destination'],code))
     except Exception:valid=False
     if not valid:fail('رمز التحقق غير صحيح أو منتهي',400)
     grant=secrets.token_urlsafe(48)
