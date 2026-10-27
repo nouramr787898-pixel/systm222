@@ -68,8 +68,46 @@ class WorkflowTests(unittest.TestCase):
         return {'name': name, 'mime': mime, 'data': base64.b64encode(data).decode()}
 
     def new_employee(self, index=1, **extra):
-        return self.admin('employees', {'company_id': 1, 'name': 'موظف تجريبي',
+        return self.admin('employees', {'company_id': 1, 'name': f'موظف تجريبي {index}',
             'login_username': f'test{index}', 'login_password': 'Testing@12345', **extra})
+
+    def test_employee_name_login_and_duplicate_rejection(self):
+        self.assertEqual(self.new_employee()[0],201)
+        self.client('موظف تجريبي 1','Testing@12345','employee')
+        self.assertEqual(self.new_employee()[0],400)
+        self.assertEqual(len(self.admin('employees')[1]),4)
+
+    def test_company_without_location_does_not_allow_unverified_attendance(self):
+        status,_=self.admin('companies',{'name':'بلا موقع','address':'عنوان'})
+        self.assertEqual(status,201)
+        with server.conn() as c:
+            c.execute('UPDATE companies SET latitude=NULL,longitude=NULL WHERE id=1')
+        self.assertEqual(self.employee('attendance',{'latitude':30,'longitude':31,'accuracy':10})[0],400)
+
+    def test_actor_snapshot_and_notification_details(self):
+        rid=self.create('annual_leave',start_date='02/11/2026',end_date='03/11/2026')
+        self.assertEqual(self.manager(f'requests/{rid}',{'status':'rejected','note':'رفض موثق'})[0],200)
+        notification=self.employee('notifications')[1][0]
+        self.assertIn('سارة خالد',notification['message'])
+        self.assertIn('مشرف',notification['message'])
+        self.assertIn('إجازة سنوية',notification['message'])
+        with server.conn() as c:c.execute("UPDATE users SET display_name='اسم جديد',role='employee' WHERE username='manager'")
+        row=next(x for x in self.admin('audit')[1] if x['action']=='status_rejected')
+        self.assertEqual(row['actor_role'],'manager')
+        self.assertEqual(row['subject_name'],'سارة خالد')
+        self.assertIn('رفض موثق',row['info'])
+        self.assertNotEqual(row['actor_name'],'اسم جديد')
+
+    def test_monthly_and_total_leave_preview(self):
+        body={'employee_id':2,'start_date':'02/11/2026','end_date':'03/11/2026'}
+        code,before=self.employee('leave/preview',body)
+        self.assertEqual(code,200)
+        self.assertEqual(before['monthly_available'],1.75)
+        self.assertEqual(before['monthly_after_approval'],0)
+        self.assertEqual(before['after_approval'],before['available']-2)
+        rid=self.create('annual_leave',start_date='26/10/2026',end_date='26/10/2026')
+        self.assertEqual(self.admin(f'requests/{rid}',{'status':'approved'})[0],200)
+        self.assertEqual(self.employee('leave/preview',body)[1]['monthly_available'],0.75)
 
     def test_numbering_and_concurrent_creation(self):
         self.assertEqual(sorted(e['employee_no'] for e in self.admin('employees')[1]), ['EH-0001','EH-0002','EH-0003'])
@@ -185,7 +223,7 @@ class WorkflowTests(unittest.TestCase):
     def test_other_employee_and_company_isolation(self):
         status,new=self.new_employee(manager_id=1)
         self.assertEqual(status,201)
-        other=self.client('test1','Testing@12345','employee')
+        other=self.client('موظف تجريبي 1','Testing@12345','employee')
         rid=self.create(attachments=[self.file()])
         aid=self.request(rid)['attachments'][0]['id']
         self.assertEqual(other('attachments/'+str(aid),binary=True)[0],403)

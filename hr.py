@@ -140,11 +140,20 @@ def details(c,u,e,d,core):
     return out
 
 
-def notify(c,r,core,message):
+def notify(c,r,core,message,actor=None):
     recipients={row[0] for row in c.execute("SELECT id FROM users WHERE role='admin' OR employee_id=?",(r['employee_id'],))}
     if r['type']!='hr_contact':
         e=c.execute('SELECT manager_id,company_id FROM employees WHERE id=?',(r['employee_id'],)).fetchone()
         recipients.update(row[0] for row in c.execute("SELECT id FROM users WHERE role='manager' AND employee_id=? AND company_id=?",(e['manager_id'],e['company_id'])))
+    employee=c.execute('SELECT name,employee_no FROM employees WHERE id=?',(r['employee_id'],)).fetchone()
+    kinds={'annual_leave':'إجازة سنوية','sick_leave':'إجازة مرضية','unpaid_leave':'إجازة غير مدفوعة','advance':'سلفة','permission':'استئذان','punch_fix':'تصحيح بصمة','termination':'إنهاء تعاقد','delegation':'انتداب','hr_contact':'تواصل مع الموارد البشرية','investigation':'تحقيق','open':'طلب مفتوح'}
+    states={'approved':'موافقة','rejected':'رفض','review':'مراجعة','cancelled':'إلغاء','closed':'إغلاق','accepted':'قبول','declined':'رفض الموظف','manager_approved':'موافقة المشرف بانتظار الإدارة'}
+    if message.startswith('تم تحديث الطلب: '):message='تم تحديث الطلب: '+states.get(message.split(': ',1)[1],message.split(': ',1)[1])
+    message+=f" · {kinds.get(r['type'],r['type'])} · {employee['name']} · {employee['employee_no']} · طلب رقم {r['id']}"
+    if actor:
+        person=c.execute('SELECT display_name,username,role FROM users WHERE id=?',(actor['id'],)).fetchone()
+        role={'admin':'أدمن','manager':'مشرف','employee':'موظف'}[person['role']]
+        message+=f" · بواسطة {person['display_name'] or person['username']} ({person['username']} — {role})"
     for uid in recipients:
         c.execute('INSERT INTO notifications(user_id,request_id,message,created_at) VALUES(?,?,?,?)',(uid,r['id'],message,core.now()))
         contact=c.execute('SELECT e.email FROM users u JOIN employees e ON e.id=u.employee_id WHERE u.id=?',(uid,)).fetchone()
@@ -237,9 +246,9 @@ def handle(h,c,u,path,method,core):
     if path=='/api/email-outbox' and method=='GET':
         admin();return respond([dict(r) for r in c.execute('SELECT id,user_id,request_id,subject,status,attempts,created_at,sent_at FROM email_outbox ORDER BY id DESC LIMIT 100')])
     if path=='/api/notifications' and method=='GET':
-        return respond([dict(r) for r in c.execute('SELECT * FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 100',(u['id'],))])
+        return respond([dict(r) for r in c.execute('SELECT n.*,e.name employee_name,e.employee_no,r.type request_type FROM notifications n LEFT JOIN requests r ON r.id=n.request_id LEFT JOIN employees e ON e.id=r.employee_id WHERE n.user_id=? ORDER BY n.id DESC LIMIT 100',(u['id'],))])
     if path=='/api/notifications/read' and method=='POST':
-        c.execute('UPDATE notifications SET read_at=? WHERE user_id=?',(core.now(),u['id']));c.commit();return respond({'ok':True})
+        c.execute('UPDATE notifications SET read_at=? WHERE user_id=?',(core.now(),u['id']));core.record(c,u,'notifications_read','user',u['id']);c.commit();return respond({'ok':True})
     if path=='/api/policy':
         admin();co=int(qs.get('company_id',[0])[0])
         if method=='POST':
@@ -250,7 +259,7 @@ def handle(h,c,u,path,method,core):
             if not 0<=minimum<=365 or not 0<=notice<=365:core.fail('مدة غير صالحة')
             changed=c.execute('UPDATE companies SET salary_basis=?,advance_min_days=?,notice_days=?,approval_mode=? WHERE id=?',(basis,minimum,notice,approval,co))
             if not changed.rowcount:core.fail('الشركة غير موجودة',404)
-            core.record(c,u,'policy_update','company',co);c.commit()
+            core.record(c,u,'policy_update','company',co,json.dumps({'salary_basis':basis,'advance_min_days':minimum,'notice_days':notice,'approval_mode':approval},ensure_ascii=False));c.commit()
         row=c.execute('SELECT id,name,salary_basis,advance_min_days,notice_days,approval_mode FROM companies WHERE id=?',(co,)).fetchone()
         if not row:core.fail('الشركة غير موجودة',404)
         return respond(dict(row))
@@ -276,13 +285,21 @@ def handle(h,c,u,path,method,core):
                 if not d['start_date'] or not d['end_date'] or d['end_date']<d['start_date']:core.fail('فترة عطلة غير صالحة')
                 keys=['name','start_date','end_date']
             cur=c.execute('INSERT INTO '+table+'(company_id,'+','.join(keys)+') VALUES('+','.join('?' for _ in range(len(keys)+1))+')',[co]+[d[k] for k in keys])
-            core.record(c,u,'create',table,cur.lastrowid,name);c.commit()
+            core.record(c,u,'create',table,cur.lastrowid,json.dumps({k:d[k] for k in keys},ensure_ascii=False));c.commit()
         return respond([dict(r) for r in c.execute('SELECT * FROM '+table+' WHERE company_id=? ORDER BY id',(co,))])
     if path=='/api/leave/preview' and method=='POST':
         d=h.input();e=core.user_allowed_emp(c,u,int(d.get('employee_id') or u['employee_id'] or 0))
         a=core.normalize_date(d.get('start_date'));b=core.normalize_date(d.get('end_date'))
         days=core.business_days(e,a,b,c);balance=leave(c,e,core)
-        return respond({'days':days,'available':balance['available'],'after_approval':round(balance['available']-days,4)})
+        month_start=core.TODAY().replace(day=1).isoformat()
+        month_end=core.TODAY().replace(day=calendar.monthrange(core.TODAY().year,core.TODAY().month)[1]).isoformat()
+        monthly_used=0.0
+        for request in c.execute("SELECT * FROM requests WHERE employee_id=? AND type='annual_leave' AND status='approved' AND start_date<=? AND end_date>=?",(e['id'],month_end,month_start)):
+            monthly_used+=core.business_days(e,max(month_start,request['start_date']),min(month_end,request['end_date']),c)
+            if month_start<=request['end_date']<=month_end and core.business_days(e,request['end_date'],request['end_date'],c)>0:monthly_used-=1-float(json.loads(request['details']).get('last_day_fraction',1))
+        monthly_used+=c.execute("SELECT COALESCE(SUM(leave_days),0) FROM absences WHERE employee_id=? AND status='approved' AND day BETWEEN ? AND ?",(e['id'],month_start,month_end)).fetchone()[0]
+        monthly_available=round(min(max(0,balance['monthly']-monthly_used),max(0,balance['available'])),4)
+        return respond({'days':days,'monthly_available':monthly_available,'monthly_after_approval':round(max(0,monthly_available-days),4),'available':balance['available'],'after_approval':round(balance['available']-days,4)})
     if path=='/api/contracts' and method=='GET':
         e=employee();return respond([dict(r) for r in c.execute('SELECT * FROM contracts WHERE employee_id=? ORDER BY id',(e['id'],))])
     if path=='/api/contracts/renew' and method=='POST':
@@ -335,7 +352,7 @@ def handle(h,c,u,path,method,core):
             attachments=core.validate_attachments(d.get('attachments',[]))
             c.execute('INSERT INTO request_comments(request_id,user_id,username,message,created_at) VALUES(?,?,?,?,?)',(rid,u['id'],u['username'],message,core.now()))
             for name,mime,content in attachments:c.execute('INSERT INTO request_attachments(request_id,name,mime,content) VALUES(?,?,?,?)',(rid,name,mime,content))
-            core.record(c,u,'comment','request',rid,message);notify(c,r,core,'ملاحظة جديدة على الطلب');c.commit()
+            core.record(c,u,'comment','request',rid,message);notify(c,r,core,'ملاحظة جديدة على الطلب',u);c.commit()
         return respond([dict(row) for row in c.execute('SELECT * FROM request_comments WHERE request_id=? ORDER BY id',(rid,))])
     if path=='/api/reports' and method=='GET':
         if u['role']=='employee':core.fail('التقارير للمسؤولين فقط',403)

@@ -292,7 +292,22 @@ def clean_contacts(d):
  return country,local,email
 
 def record(c,u,action,entity,eid=None,info=''):
- c.execute('INSERT INTO audit(user_id,username,action,entity,entity_id,info,timestamp) VALUES(?,?,?,?,?,?,?)',(u['id'],u['username'],action,entity,eid,info,now()))
+ actor=c.execute('SELECT username,display_name,role FROM users WHERE id=?',(u['id'],)).fetchone()
+ subject=None;request_type=None;employee_no=None
+ if entity=='request':
+  subject=c.execute('SELECT e.name,e.employee_no,r.type,r.start_date,r.end_date,r.days,r.amount,r.installment,r.notes FROM requests r JOIN employees e ON e.id=r.employee_id WHERE r.id=?',(eid,)).fetchone()
+  if subject:
+   request_type=subject['type'];employee_no=subject['employee_no']
+   if action=='create':info={k:subject[k] for k in ('start_date','end_date','days','notes')}
+   if action=='create' and request_type=='advance':info.update(amount=subject['amount'],installment=subject['installment'])
+ elif entity in ('employee','attendance'):
+  subject=c.execute('SELECT name,employee_no FROM employees WHERE id=?',(eid,)).fetchone()
+  if subject:employee_no=subject['employee_no']
+ elif entity=='company':
+  subject=c.execute('SELECT name,city,address,contract_end,latitude,longitude,geofence_radius FROM companies WHERE id=?',(eid,)).fetchone()
+  if subject and action in ('create','update'):info=dict(subject)
+ envelope={'audit_version':1,'actor_name':(actor['display_name'] or actor['username']) if actor else u['username'],'actor_role':actor['role'] if actor else u['role'],'subject_name':subject['name'] if subject else '', 'employee_no':employee_no,'request_type':request_type,'details':info}
+ c.execute('INSERT INTO audit(user_id,username,action,entity,entity_id,info,timestamp) VALUES(?,?,?,?,?,?,?)',(u['id'],u['username'],action,entity,eid,json.dumps(envelope,ensure_ascii=False),now()))
 def obj(row):return dict(row) if row is not None else None
 def fail(msg,code=400):raise AppError(msg,code)
 class AppError(Exception):
@@ -427,7 +442,7 @@ class Handler(BaseHTTPRequestHandler):
   c=conn()
   try:
    if method=='POST' and path=='/api/login':
-    d=self.input();u=c.execute('SELECT * FROM users WHERE username=?',(d.get('username',''),)).fetchone()
+    d=self.input();u=c.execute('SELECT * FROM users WHERE username=?',(str(d.get('username','')).strip(),)).fetchone()
     if not u or not verifypw(d.get('password',''),u['password_hash']) or u['role']!=d.get('account_role'):fail('بيانات الدخول أو نوع الحساب غير صحيحة',401)
     if not self.account_active(c,u):fail('الحساب غير نشط؛ راجع الإدارة',403)
     token=secrets.token_urlsafe(32)
@@ -561,6 +576,7 @@ class Handler(BaseHTTPRequestHandler):
     return self.write([dict(x) for x in c.execute("SELECT e.id,e.name,e.company_id,u.username FROM employees e JOIN users u ON u.employee_id=e.id AND u.role='manager' AND u.company_id=e.company_id WHERE e.archived=0")])
    if path=='/api/me' and method=='GET':return self.write(dict(u))
    if path=='/api/logout' and method=='POST':
+    record(c,u,'logout','user',u['id']);c.commit()
     cookie=SimpleCookie();cookie.load(self.headers.get('Cookie',''));v=cookie.get('ehkam_session')
     if v:
      with LOCK:SESSIONS.pop(v.value,None)
@@ -581,8 +597,8 @@ class Handler(BaseHTTPRequestHandler):
      lon=float(d.get('longitude')) if str(d.get('longitude','')).strip() else None
      radius=float(d.get('geofence_radius') or 100)
     except (TypeError,ValueError):fail('إحداثيات الموقع أو نطاق البصمة غير صحيحة')
-    if lat is None or lon is None:fail('تحديد خط العرض وخط الطول مطلوب لتفعيل البصمة الجغرافية')
-    if not (-90<=lat<=90 and -180<=lon<=180):fail('إحداثيات الموقع خارج النطاق الصحيح')
+    if (lat is None)!=(lon is None):fail('يجب تحديد إحداثيات الموقع معًا')
+    if lat is not None and not (-90<=lat<=90 and -180<=lon<=180):fail('إحداثيات الموقع خارج النطاق الصحيح')
     if not (20<=radius<=1000):fail('نطاق البصمة يجب أن يكون بين 20 و1000 متر')
     if path!='/api/companies':
      cid=int(path.rsplit('/',1)[1]);changed=c.execute('UPDATE companies SET name=?,name_en=?,contract_end=?,city=?,address=?,latitude=?,longitude=?,geofence_radius=? WHERE id=?',(name,d.get('name_en',''),normalize_date(d.get('contract_end')),d.get('city',''),d.get('address',''),lat,lon,radius,cid))
@@ -599,8 +615,8 @@ class Handler(BaseHTTPRequestHandler):
     number=c.execute('UPDATE employee_number_sequence SET value=value+1 WHERE id=1 RETURNING value').fetchone()[0]
     d['employee_no']=f'EH-{number:04d}'
     country,phone,email=clean_contacts(d)
-    username=str(d.get('login_username','')).strip();newpw=str(d.get('login_password',''))
-    if not username or len(newpw)<10 or len(newpw)>128 or not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}',username):fail('اسم دخول إنجليزي 3–64 حرف وكلمة مرور لا تقل عن 10 أحرف مطلوبان')
+    username=str(d['name']).strip();newpw=str(d.get('login_password',''))
+    if not username or len(username)>128 or any(ord(ch)<32 for ch in username) or len(newpw)<10 or len(newpw)>128:fail('اسم موظف صالح لا يتجاوز 128 حرفًا وكلمة مرور 10–128 حرفًا مطلوبان')
     if c.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():fail('اسم المستخدم مستخدم بالفعل')
     extra_employee=['passport','nationality','birth_date','qualification','specialization','branch','iban','bank_name']
     keys=extra_employee+['phone_country','phone_local','email','photo','company_id','name','name_en','employee_no','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method']
@@ -644,7 +660,7 @@ class Handler(BaseHTTPRequestHandler):
     fresh=c.execute('SELECT * FROM employees WHERE id=?',(eid,)).fetchone()
     c.execute('UPDATE contracts SET start_date=?,end_date=?,entitlement=?,opening=? WHERE employee_id=? AND closed_at IS NULL',(fresh['contract_start'],fresh['contract_end'],fresh['annual_entitlement'],fresh['carryover'],eid))
     c.execute('UPDATE users SET display_name=? WHERE employee_id=?',(fresh['name'],eid))
-    record(c,u,'update','employee',eid,','.join(changes));c.commit();return self.write({'ok':True})
+    record(c,u,'update','employee',eid,{k:{'before':('صورة سابقة' if e[k] else 'بدون صورة') if k=='photo' else e[k] if k in e.keys() else None,'after':'تم تحديث الصورة' if k=='photo' else v} for k,v in changes.items()});c.commit();return self.write({'ok':True})
    if re.fullmatch(r'/api/leave/[0-9]+',path) and method=='GET':
     eid=int(path.rsplit('/',1)[1]);e=user_allowed_emp(c,u,eid);return self.write(leave(c,e))
    if path=='/api/advance/preview' and method=='GET':
@@ -704,7 +720,7 @@ class Handler(BaseHTTPRequestHandler):
     if typ=='delegation' and u['employee_id']!=e['manager_id']:fail('يمكن للمشرف إصدار انتداب لموظفيه فقط')
     ts=now();cur=c.execute('''INSERT INTO requests(company_id,employee_id,type,start_date,end_date,days,amount,installment,notes,created_by,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',(e['company_id'],eid,typ,a,b,days,amount,inst,str(d.get('notes','')),u['id'],e['manager_id'],ts,ts))
     c.execute('UPDATE requests SET details=?,contract_id=? WHERE id=?',(json.dumps(detail,ensure_ascii=False),hr.ensure_contract(c,e),cur.lastrowid))
-    hr.notify(c,c.execute('SELECT * FROM requests WHERE id=?',(cur.lastrowid,)).fetchone(),sys.modules[__name__],'تم تسجيل طلب جديد')
+    hr.notify(c,c.execute('SELECT * FROM requests WHERE id=?',(cur.lastrowid,)).fetchone(),sys.modules[__name__],'تم تسجيل طلب جديد',u)
     for name,mime,content in attachments:c.execute('INSERT INTO request_attachments(request_id,name,mime,content) VALUES(?,?,?,?)',(cur.lastrowid,name,mime,content))
     record(c,u,'create','request',cur.lastrowid,typ);c.commit();return self.write({'id':cur.lastrowid,'number':f'EH-{cur.lastrowid:06d}'},201)
    if re.fullmatch(r'/api/requests/[0-9]+',path) and method=='POST':
@@ -762,8 +778,8 @@ class Handler(BaseHTTPRequestHandler):
       record(c,u,'absence_reversed_by_correction','employee',e['id'],r['start_date'])
     if r['type'] in ('annual_leave','sick_leave','unpaid_leave') and action in ('approved','cancelled'):
      hr.reconcile_absences(c,e['id'],r['start_date'],r['end_date'],sys.modules[__name__])
-    hr.notify(c,r,sys.modules[__name__],'تم تحديث الطلب: '+action)
-    record(c,u,'status_'+action,'request',rid,d.get('note',''));c.commit();return self.write({'ok':True})
+    hr.notify(c,r,sys.modules[__name__],'تم تحديث الطلب: '+decision_status,u)
+    record(c,u,'status_'+decision_status,'request',rid,d.get('note',''));c.commit();return self.write({'ok':True})
    if path=='/api/attendance' and method=='GET':
     qs=parse_qs(urlparse(self.path).query);eid=int(qs.get('employee_id',[u['employee_id'] or 0])[0]);user_allowed_emp(c,u,eid)
     q='SELECT * FROM attendance WHERE employee_id=?';p=[eid]
@@ -829,7 +845,16 @@ class Handler(BaseHTTPRequestHandler):
     record(c,u,'archive' if value else 'restore',target,eid,'confirmed');c.commit();return self.write({'ok':True,'message':'تمت الأرشفة بنجاح' if value else 'تم الاسترجاع بنجاح'})
    if path=='/api/audit' and method=='GET':
     if u['role']!='admin':fail('غير مصرح',403)
-    return self.write([dict(x) for x in c.execute('SELECT * FROM audit ORDER BY id DESC LIMIT 200')])
+    rows=[]
+    for item in c.execute('SELECT a.*,u.display_name current_name,u.role current_role FROM audit a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 200'):
+     row=dict(item)
+     try:
+      detail=json.loads(row['info'])
+      if isinstance(detail,dict) and detail.get('audit_version')==1:
+       row.update({key:detail.get(key) for key in ('actor_name','actor_role','subject_name','employee_no','request_type')})
+     except (ValueError,TypeError):pass
+     rows.append(row)
+    return self.write(rows)
    if path=='/api/report.csv' and method=='GET':
     rows=visible_employees(c,u);output=io.StringIO();w=csv.writer(output);w.writerow(['Company ID','Employee ID','Name','Employee No','Department','Status','Gross Salary'])
     for e in rows:w.writerow([e['company_id'],e['id'],e['name'],e['employee_no'],e['department'],e['status'],e['gross_salary']])
