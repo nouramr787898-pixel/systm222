@@ -14,7 +14,7 @@ const assert=require('node:assert/strict');
  try{
  await login('employee','Employee@123');
  await page.locator('.emp-profile').waitFor();
- assert.equal(await page.locator('.emp-profile input,.emp-profile textarea,.emp-profile button').count(),0);
+ assert.equal(await page.locator('.emp-profile input,.emp-profile textarea').count(),0);
  assert(!(await page.locator('.emp-profile').innerText()).includes('للعرض فقط'));
  assert((await page.locator('.emp-profile').innerText()).includes('الاثنين'));
  assert((await page.locator('.emp-profile').innerText()).includes('01/01/2026'));

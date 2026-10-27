@@ -84,7 +84,7 @@ class WorkflowTests(unittest.TestCase):
     def test_migration_preserves_old_data_and_is_repeatable(self):
         with server.conn() as c:
             c.execute('DROP INDEX employees_number_global')
-            for table in ['employee_number_history','employee_number_sequence','request_attachments','request_decisions','schema_migrations']:
+            for table in ['email_outbox','employee_files','overtime_reviews','notifications','request_comments','settlements','absences','contracts','schedules','work_sites','holidays','employee_number_history','employee_number_sequence','request_attachments','request_decisions','schema_migrations']:
                 c.execute('DROP TABLE '+table)
             c.execute("UPDATE employees SET employee_no='OLD-' || id")
             c.execute("UPDATE employees SET employee_no=CASE id WHEN 1 THEN 'EH-0002' WHEN 2 THEN 'A-002' ELSE 'EH-0001' END")
@@ -113,7 +113,8 @@ class WorkflowTests(unittest.TestCase):
     def test_attachments_for_every_request_type(self):
         files=[self.file(), self.file('صورة.PNG','image/png',(server.BASE/'favicon.png').read_bytes()), self.file('photo.jpg','image/jpeg',b'\xff\xd8\xff\xe0test\xff\xd9')]
         for typ in ['annual_leave','sick_leave','unpaid_leave','advance','permission','punch_fix','hr_contact','investigation','termination','open','delegation']:
-            data={'employee_id':2,'type':typ,'notes':'تفاصيل','start_date':'02/11/2026','end_date':'03/11/2026','amount':100,'installment':50,'attachments':files}
+            data={'employee_id':2,'type':typ,'notes':'تفاصيل','start_date':'02/11/2026','end_date':'03/11/2026','amount':100,'installment':50,'attachments':files,'time_from':'10:00','time_to':'11:00','incident_description':'واقعة اختبار','incident_date':'01/10/2026','last_work_day':'31/12/2026'}
+            if typ=='punch_fix':data.update(start_date='26/10/2026',end_date='26/10/2026')
             client=self.manager if typ=='delegation' else self.employee
             status,result=client('requests',data)
             self.assertEqual(status,201,(typ,result))

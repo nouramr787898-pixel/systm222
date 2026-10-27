@@ -76,3 +76,5 @@
 
 [hidden]{display:none!important}
 .workweek{display:flex;flex-wrap:wrap;gap:12px;border:1px solid #ddd;border-radius:8px}.workweek label{display:flex;align-items:center;gap:6px}.workweek input{width:auto}.preserve-lines{white-space:pre-wrap;overflow-wrap:anywhere}
+.absence-row{padding:12px;border-bottom:1px solid #ddd}.absence-row button{margin-inline-end:8px}
+@media print{.sidebar,.topbar,.filterbar,.aside-footer,footer,#toast{display:none!important}.workspace{margin:0!important;width:100%}.panel{box-shadow:none;border:0}body{background:white}table{font-size:10px}th,td{white-space:normal!important}.table-wrap{overflow:visible}}
