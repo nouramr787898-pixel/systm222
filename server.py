@@ -263,14 +263,15 @@ class Handler(BaseHTTPRequestHandler):
     record(c,u,'login','user',u['id']);c.commit()
     return self.write({'ok':True},headers={'Set-Cookie':'ehkam_session='+token+'; HttpOnly; SameSite=Strict; Path=/'})
    if method=='POST' and path=='/api/password/request':
-    d=self.input();username=str(d.get('username','')).strip();ip=self.client_address[0]
+    d=self.input();username=str(d.get('username','')).strip();requested=str(d.get('channel') or 'email').strip().lower();ip=self.client_address[0]
+    if requested not in ('email','whatsapp','dual'):requested='email'
     if not username:fail('اسم المستخدم مطلوب')
-    current=int(time.time());key=(ip,username)
+    current=int(time.time());key=(ip,username,requested)
     with LOCK:
      timestamps=[t for t in RESET_ATTEMPTS.get(key,[]) if current-t<3600]
      if len(timestamps)>=5:fail('محاولات كثيرة؛ حاول لاحقًا',429)
      timestamps.append(current);RESET_ATTEMPTS[key]=timestamps
-    generic={'message':'إذا كان الحساب موجودًا ومسجّلًا ببريد ورقم واتساب، سيصلك رمز البريد.'}
+    generic={'message':'إذا كان الحساب موجودًا ومسجّلًا بوسيلة التحقق المختارة، سيصلك رمز التحقق.'}
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
     if not u:return self.write(generic)
     e=c.execute('SELECT email,phone_country,phone_local FROM employees WHERE id=?',(u['employee_id'],)).fetchone()
@@ -280,35 +281,65 @@ class Handler(BaseHTTPRequestHandler):
     local=re.sub(r'[^0-9]','',str(e['phone_local'] or ''))
     if local.startswith('0'):local=local[1:]
     phone=country+local
-    if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',destination) or country not in ('+966','+20') or not (8<=len(local)<=10):return self.write(generic)
-    code=f'{secrets.randbelow(1000000):06d}'
-    if not resend_send_reset(destination,code):fail('تعذر إرسال البريد حاليًا؛ راجع سجلات Railway',503)
+    valid_email=bool(re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',destination))
+    valid_phone=country in ('+966','+20') and (8<=len(local)<=10)
     c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
-    c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at,channel,destination,whatsapp_phone) VALUES(?,?,?,?,?,?)',
+    if requested=='dual':
+     if not valid_email or not valid_phone:return self.write(generic)
+     code=f'{secrets.randbelow(1000000):06d}'
+     if not resend_send_reset(destination,code):fail('تعذر إرسال البريد حاليًا؛ راجع إعداد Resend أو سجلات Railway',503)
+     c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at,channel,destination,whatsapp_phone) VALUES(?,?,?,?,?,?)',
       (u['id'],hashpw(code),current+600,'dual',destination,phone))
+    elif requested=='email':
+     if not valid_email:return self.write(generic)
+     code=f'{secrets.randbelow(1000000):06d}'
+     if not resend_send_reset(destination,code):fail('تعذر إرسال البريد حاليًا؛ راجع إعداد Resend أو سجلات Railway',503)
+     c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at,channel,destination,whatsapp_phone) VALUES(?,?,?,?,?,?)',
+      (u['id'],hashpw(code),current+600,'email',destination,phone))
+    else:
+     if not valid_phone:return self.write(generic)
+     try:sent=authevo_send(phone)
+     except RuntimeError:sent=False
+     if not sent:fail('تعذر إرسال رمز واتساب حاليًا؛ تحقق من إعداد Authevo ورصيد الخدمة',503)
+     c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at,channel,destination,whatsapp_phone,whatsapp_sent) VALUES(?,?,?,?,?,?,?)',
+      (u['id'],hashpw(secrets.token_urlsafe(8)),current+600,'whatsapp',phone,phone,1))
     c.commit();return self.write(generic)
    if method=='POST' and path=='/api/password/verify':
-    d=self.input();username=str(d.get('username','')).strip();code=str(d.get('code','')).strip();channel=d.get('channel')
+    d=self.input();username=str(d.get('username','')).strip();code=str(d.get('code','')).strip();channel=str(d.get('channel') or '').strip().lower()
     if not re.fullmatch(r'\d{6}',code) or channel not in ('email','whatsapp'):fail('رمز التحقق غير صحيح',400)
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
     if not u:fail('رمز التحقق غير صحيح أو منتهي',400)
     r=c.execute('SELECT * FROM password_resets WHERE user_id=? AND used=0 ORDER BY id DESC LIMIT 1',(u['id'],)).fetchone()
-    if not r or r['expires_at']<int(time.time()) or r['channel']!='dual':fail('رمز التحقق غير صحيح أو منتهي',400)
-    if channel=='email':
-     if r['email_verified'] or r['attempts']>=5:fail('رمز البريد مستعمل أو تجاوز عدد المحاولات',400)
-     c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],));c.commit()
-     if not verifypw(code,r['code_hash']):fail('رمز البريد غير صحيح أو منتهي',400)
-     c.execute('UPDATE password_resets SET email_verified=1 WHERE id=?',(r['id'],));c.commit()
-     try: sent=authevo_send(r['whatsapp_phone'])
-     except RuntimeError:sent=False
-     if sent:
-      c.execute('UPDATE password_resets SET whatsapp_sent=1 WHERE id=?',(r['id'],));c.commit()
-     return self.write({'ok':True,'next':'whatsapp','whatsapp_sent':bool(sent)})
-    if not r['email_verified'] or not r['whatsapp_sent'] or r['whatsapp_attempts']>=5:fail('يجب تأكيد البريد وإرسال رمز واتساب أولًا',403)
-    c.execute('UPDATE password_resets SET whatsapp_attempts=whatsapp_attempts+1 WHERE id=?',(r['id'],));c.commit()
-    try: verified=authevo_verify(r['whatsapp_phone'],code)
-    except RuntimeError:fail('تعذر التحقق من واتساب حاليًا',503)
-    if not verified:fail('رمز واتساب غير صحيح أو منتهي',400)
+    if not r or r['expires_at']<int(time.time()):fail('رمز التحقق غير صحيح أو منتهي',400)
+    if r['channel']=='dual':
+     if channel=='email':
+      if r['email_verified'] or r['attempts']>=5:fail('رمز البريد مستعمل أو تجاوز عدد المحاولات',400)
+      c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],));c.commit()
+      if not verifypw(code,r['code_hash']):fail('رمز البريد غير صحيح أو منتهي',400)
+      c.execute('UPDATE password_resets SET email_verified=1 WHERE id=?',(r['id'],));c.commit()
+      try: sent=authevo_send(r['whatsapp_phone'])
+      except RuntimeError:sent=False
+      if sent:
+       c.execute('UPDATE password_resets SET whatsapp_sent=1 WHERE id=?',(r['id'],));c.commit()
+      return self.write({'ok':True,'next':'whatsapp','whatsapp_sent':bool(sent)})
+     if not r['email_verified'] or not r['whatsapp_sent'] or r['whatsapp_attempts']>=5:fail('يجب تأكيد البريد وإرسال رمز واتساب أولًا',403)
+     c.execute('UPDATE password_resets SET whatsapp_attempts=whatsapp_attempts+1 WHERE id=?',(r['id'],));c.commit()
+     try: verified=authevo_verify(r['whatsapp_phone'],code)
+     except RuntimeError:fail('تعذر التحقق من واتساب حاليًا',503)
+     if not verified:fail('رمز واتساب غير صحيح أو منتهي',400)
+    else:
+      if r['channel']!=channel:fail('وسيلة التحقق الحالية لا تطابق الوسيلة المختارة',400)
+      if channel=='email':
+       if r['attempts']>=5:fail('تم تجاوز عدد المحاولات لهذا الرمز',400)
+       c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],));c.commit()
+       if not verifypw(code,r['code_hash']):fail('رمز البريد غير صحيح أو منتهي',400)
+       c.execute('UPDATE password_resets SET email_verified=1 WHERE id=?',(r['id'],));c.commit()
+      else:
+       if r['whatsapp_attempts']>=5:fail('تم تجاوز عدد المحاولات لهذا الرمز',400)
+       c.execute('UPDATE password_resets SET whatsapp_attempts=whatsapp_attempts+1 WHERE id=?',(r['id'],));c.commit()
+       try: verified=authevo_verify(r['whatsapp_phone'] or r['destination'],code)
+       except RuntimeError:fail('تعذر التحقق من واتساب حاليًا',503)
+       if not verified:fail('رمز واتساب غير صحيح أو منتهي',400)
     grant=secrets.token_urlsafe(48)
     c.execute('UPDATE password_resets SET verified_token_hash=? WHERE id=?',(hashlib.sha256(grant.encode()).hexdigest(),r['id']))
     c.commit();return self.write({'ok':True,'reset_token':grant})
@@ -337,9 +368,13 @@ class Handler(BaseHTTPRequestHandler):
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
     if not u:fail('التحقق غير صالح أو منتهي',403)
     r=c.execute('SELECT * FROM password_resets WHERE user_id=? AND used=0 ORDER BY id DESC LIMIT 1',(u['id'],)).fetchone()
-    if not r or r['channel']!='dual' or not r['email_verified'] or not r['whatsapp_sent'] or r['expires_at']<int(time.time()) or not r['verified_token_hash'] or not hmac.compare_digest(r['verified_token_hash'],hashlib.sha256(grant.encode()).hexdigest()):
-     fail('التحقق غير صالح أو منتهي',403)
-    # Atomic one-time redemption; can't reuse token to change the password again.
+    valid=False
+    if r and r['expires_at']>=int(time.time()) and r['verified_token_hash'] and hmac.compare_digest(r['verified_token_hash'],hashlib.sha256(grant.encode()).hexdigest()):
+     if r['channel']=='dual':
+      valid=bool(r['email_verified'] and r['whatsapp_sent'])
+     elif r['channel'] in ('email','whatsapp'):
+      valid=True
+    if not valid:fail('التحقق غير صالح أو منتهي',403)
     changed=c.execute('UPDATE password_resets SET used=1,verified_token_hash=NULL WHERE id=? AND used=0 AND verified_token_hash=?',(r['id'],r['verified_token_hash']))
     if changed.rowcount!=1:fail('تم استخدام رمز التحقق بالفعل',403)
     c.execute('UPDATE users SET password_hash=? WHERE id=?',(hashpw(password),u['id']))
