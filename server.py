@@ -1,7 +1,7 @@
 """EHKAM HR Portal - local functional prototype. Run: python server.py"""
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import sqlite3, json, os, hashlib, hmac, secrets, datetime, csv, io, threading, re, time, ssl, smtplib, urllib.request, urllib.parse, base64
+import sqlite3, json, os, hashlib, hmac, secrets, datetime, csv, io, threading, re, time, ssl, smtplib, urllib.request, urllib.parse, urllib.error, base64, html
 from email.message import EmailMessage
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -56,37 +56,53 @@ def init():
  c.commit();c.close()
 
 def bird_recipient(channel, destination):
- if channel == 'email':
-  return {'email_address': destination}
- if channel == 'sms' and re.fullmatch(r'\+(?:20|966)[0-9]{8,10}', destination):
-  return {'phone_number': destination}
+ if channel == 'email' and re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',destination):
+  return {'email':destination}
+ if channel == 'sms' and re.fullmatch(r'\+(?:20|966)[0-9]{8,10}',destination):
+  return {'phone_number':destination}
  raise ValueError('Invalid verification recipient')
 
-def bird_verify_api(endpoint, payload):
- """Bird Verify regional HTTPS API. Never log API keys, codes or phone numbers."""
+def bird_api(endpoint, payload):
+ """Bird regional API; secrets and personal data must never be logged."""
  key=os.environ.get('BIRD_API_KEY','').strip()
- if not key:raise RuntimeError('BIRD_API_KEY is missing')
  if key.startswith('bk_eu1_'):region='eu1'
  elif key.startswith('bk_us1_'):region='us1'
- else:raise RuntimeError('Bird key region is not recognized')
- url=f'https://{region}.platform.bird.com/v1/verify/verifications'+endpoint
- body=json.dumps(payload,separators=(',',':')).encode('utf-8')
- req=urllib.request.Request(url,body,method='POST',headers={
-  'Authorization':'Bearer '+key,'Content-Type':'application/json','Accept':'application/json'
- })
- with urllib.request.urlopen(req,timeout=15) as resp:
-  result=json.load(resp)
- return result
+ else:raise RuntimeError('Missing or unsupported Bird API key')
+ url=f'https://{region}.platform.bird.com'+endpoint
+ req=urllib.request.Request(url,json.dumps(payload).encode('utf-8'),method='POST',headers={
+  'Authorization':'Bearer '+key,'Content-Type':'application/json','Accept':'application/json'})
+ with urllib.request.urlopen(req,timeout=20) as resp:
+  return json.load(resp)
 
 def bird_send_reset(channel,destination):
- payload={'to':bird_recipient(channel,destination)}
- if channel=='sms':payload['options']={'channels':['sms']}
- result=bird_verify_api('',payload)
- return result.get('status') in ('pending','verified')
+ if channel=='sms':
+  result=bird_api('/v1/verify/verifications',{'to':bird_recipient('sms',destination)})
+  return result.get('status')=='pending',None
+ if channel=='email':
+  sender=os.environ.get('BIRD_FROM_EMAIL','').strip()
+  if not sender or not re.fullmatch(r'[^\s@]+@ehkambusiness\.com',sender,re.I):
+   raise RuntimeError('BIRD_FROM_EMAIL not configured')
+  code=f'{secrets.randbelow(1000000):06d}'
+  body='رمز التحقق الخاص باستعادة كلمة المرور في منصة إحكام الأعمال هو: '+code+'. ينتهي الرمز بعد عشر دقائق. لا تشاركه مع أحد.'
+  result=bird_api('/v1/email/messages',{
+    'from':{'email':sender,'name':'إحكام الأعمال'},
+    'to':[destination],'subject':'رمز استعادة كلمة المرور — إحكام الأعمال',
+    'text':body,'category':'transactional'
+  })
+  # Only accept a confirmed Bird submission; acceptance does not prove delivery.
+  if not result.get('id') or result.get('status') not in ('accepted','queued','pending'):
+   return False,None
+  # Store a per-request salted hash, NEVER the 6-digit code itself.
+  return True,hashpw(code)
+ raise ValueError('Unknown reset channel')
 
-def bird_check_reset(channel,destination,code):
- result=bird_verify_api('/check',{'to':bird_recipient(channel,destination),'code':code})
- return result.get('success') is True
+def bird_check_reset(channel,destination,code,stored_hash):
+ if channel=='sms':
+  result=bird_api('/v1/verify/verifications/check',{
+    'to':bird_recipient('sms',destination),'code':code})
+  return result.get('success') is True
+ if channel=='email':return bool(stored_hash and verifypw(code,stored_hash))
+ return False
 
 def clean_contacts(d):
  country=str(d.get('phone_country') or '+966');local=re.sub(r'[^0-9]','',str(d.get('phone_local') or ''))
@@ -226,12 +242,12 @@ class Handler(BaseHTTPRequestHandler):
     destination=e['email'] if channel=='email' else (str(e['phone_country'] or '')+str(e['phone_local'] or '') if e['phone_local'] else '')
     if not destination:return self.write(generic)
     if not os.environ.get('BIRD_API_KEY'):fail('خدمة الاستعادة لم تُضبط بعد؛ تواصل مع الإدارة',503)
-    try:sent=bird_send_reset(channel,destination)
+    try:sent,reset_hash=bird_send_reset(channel,destination)
     except Exception:sent=False
     if not sent:fail('تعذر إرسال الرمز حاليًا؛ تحقق من تفعيل الخدمة في Bird',503)
     c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
     c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at,channel,destination) VALUES(?,?,?,?,?)',
-      (u['id'],'bird-managed',current+600,channel,destination))
+      (u['id'],reset_hash or 'bird-managed',current+600,channel,destination))
     c.commit()
     return self.write(generic)
    if method=='POST' and path=='/api/password/confirm':
@@ -243,10 +259,13 @@ class Handler(BaseHTTPRequestHandler):
     if not r or r['expires_at']<int(time.time()) or r['attempts']>=5:fail('الرمز غير صحيح أو منتهي')
     if not r['channel'] or not r['destination']:fail('الرمز غير صحيح أو منتهي')
     c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],));c.commit()
-    try:valid=bird_check_reset(r['channel'],r['destination'],code)
+    try:valid=bird_check_reset(r['channel'],r['destination'],code,r['code_hash'])
     except Exception:valid=False
     if not valid:fail('الرمز غير صحيح أو منتهي')
     c.execute('UPDATE users SET password_hash=? WHERE id=?',(hashpw(password),u['id']))
+    with LOCK:
+     for token,uid in list(SESSIONS.items()):
+      if uid==u['id']:SESSIONS.pop(token,None)
     c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
     record(c,u,'password_reset','user',u['id']);c.commit();return self.write({'ok':True})
    u=self.actor(c)
