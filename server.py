@@ -435,6 +435,7 @@ class Handler(BaseHTTPRequestHandler):
   if method=='GET' and path in ('/','/index.html'):
    return self.write((BASE/'index.html').read_bytes(),ctype='text/html')
   if method=='GET' and path=='/style.css':return self.write((BASE/'style.css').read_bytes(),ctype='text/css')
+  if method=='GET' and path=='/i18n.js':return self.write((BASE/'i18n.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/hr-ui.js':return self.write((BASE/'hr-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/app.js':return self.write((BASE/'app.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path in ('/favicon.ico','/favicon.png','/ehkam-icon.png','/ehkam-logo-full.png'):
