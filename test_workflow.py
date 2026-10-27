@@ -102,12 +102,18 @@ class WorkflowTests(unittest.TestCase):
         body={'employee_id':2,'start_date':'02/11/2026','end_date':'03/11/2026'}
         code,before=self.employee('leave/preview',body)
         self.assertEqual(code,200)
-        self.assertEqual(before['monthly_available'],1.75)
-        self.assertEqual(before['monthly_after_approval'],0)
+        self.assertEqual(before['monthly_available'],round(46/12,4))
+        self.assertEqual(before['monthly_after_approval'],round(46/12-2,4))
         self.assertEqual(before['after_approval'],before['available']-2)
         rid=self.create('annual_leave',start_date='26/10/2026',end_date='26/10/2026')
         self.assertEqual(self.admin(f'requests/{rid}',{'status':'approved'})[0],200)
-        self.assertEqual(self.employee('leave/preview',body)[1]['monthly_available'],0.75)
+        self.assertEqual(self.employee('leave/preview',body)[1]['monthly_available'],round(46/12,4))
+
+    def test_hr_contact_notes_without_title(self):
+        rid=self.create('hr_contact',notes='تفاصيل تواصل بدون عنوان')
+        request=self.request(rid)
+        self.assertEqual(request['details']['title'],'')
+        self.assertEqual(request['notes'],'تفاصيل تواصل بدون عنوان')
 
     def test_numbering_and_concurrent_creation(self):
         self.assertEqual(sorted(e['employee_no'] for e in self.admin('employees')[1]), ['EH-0001','EH-0002','EH-0003'])

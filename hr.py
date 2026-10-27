@@ -88,7 +88,7 @@ def leave(c,e,core,asof=None):
             month=start.month-1+i;year=start.year+month//12;month=month%12+1
             date=dt.date(year,month,min(start.day,calendar.monthrange(year,month)[1]))
             history.append({'date':date.isoformat(),'days':round(monthly,4)})
-    return {'contract_id':cid,'carryover':carried,'annual_entitlement':e['annual_entitlement'],'monthly':round(monthly,4),'accrued':accrued,
+    return {'contract_id':cid,'carryover':carried,'annual_entitlement':e['annual_entitlement'],'monthly':round(monthly,4),'monthly_allowance':round((float(e['carryover'])+float(e['annual_entitlement']))/12,4),'accrued':accrued,
             'approved_used':used,'absence_used':absent,'settled_days':settled,'available':round(carried+accrued-used-absent-settled,4),
             'elapsed_months':elapsed,'monthly_history':history,'expired_contract_accrual':expired_accrual}
 
@@ -101,10 +101,11 @@ def details(c,u,e,d,core):
     kind=d['type'];out={}
     for key in ('title','incident_description','parties','destination'):
         out[key]=str(d.get(key) or '').strip()[:2000]
-    if kind in ('open','hr_contact','investigation') and not out['title']:
+    if kind in ('open','investigation') and not out['title']:
         # Older API clients may supply notes only. Title derives from the note, never fabricated facts.
         out['title']=str(d.get('notes') or '').strip()[:120]
         if not out['title']:core.fail('عنوان الطلب مطلوب')
+    if kind=='hr_contact' and not str(d.get('notes') or '').strip():core.fail('اكتب تفاصيل التواصل في الملاحظات')
     if kind=='annual_leave':
         fraction=float(d.get('last_day_fraction',1))
         if fraction not in (.25,.5,.75,1):core.fail('كسر يوم الإجازة غير صالح')
@@ -291,14 +292,7 @@ def handle(h,c,u,path,method,core):
         d=h.input();e=core.user_allowed_emp(c,u,int(d.get('employee_id') or u['employee_id'] or 0))
         a=core.normalize_date(d.get('start_date'));b=core.normalize_date(d.get('end_date'))
         days=core.business_days(e,a,b,c);balance=leave(c,e,core)
-        month_start=core.TODAY().replace(day=1).isoformat()
-        month_end=core.TODAY().replace(day=calendar.monthrange(core.TODAY().year,core.TODAY().month)[1]).isoformat()
-        monthly_used=0.0
-        for request in c.execute("SELECT * FROM requests WHERE employee_id=? AND type='annual_leave' AND status='approved' AND start_date<=? AND end_date>=?",(e['id'],month_end,month_start)):
-            monthly_used+=core.business_days(e,max(month_start,request['start_date']),min(month_end,request['end_date']),c)
-            if month_start<=request['end_date']<=month_end and core.business_days(e,request['end_date'],request['end_date'],c)>0:monthly_used-=1-float(json.loads(request['details']).get('last_day_fraction',1))
-        monthly_used+=c.execute("SELECT COALESCE(SUM(leave_days),0) FROM absences WHERE employee_id=? AND status='approved' AND day BETWEEN ? AND ?",(e['id'],month_start,month_end)).fetchone()[0]
-        monthly_available=round(min(max(0,balance['monthly']-monthly_used),max(0,balance['available'])),4)
+        monthly_available=balance['monthly_allowance']
         return respond({'days':days,'monthly_available':monthly_available,'monthly_after_approval':round(max(0,monthly_available-days),4),'available':balance['available'],'after_approval':round(balance['available']-days,4)})
     if path=='/api/contracts' and method=='GET':
         e=employee();return respond([dict(r) for r in c.execute('SELECT * FROM contracts WHERE employee_id=? ORDER BY id',(e['id'],))])
