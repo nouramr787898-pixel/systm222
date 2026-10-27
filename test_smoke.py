@@ -9,7 +9,7 @@ def client(name,pw):
   try:
    with op.open(r) as x:return x.status,json.loads(x.read())
   except urllib.error.HTTPError as e:return e.code,json.loads(e.read())
- assert call('login',{'username':name,'password':pw})[0]==200
+ assert call('login',{'username':name,'password':pw,'account_role':name})[0]==200
  return call
 admin=client('admin','Admin@123');employee=client('employee','Employee@123');manager=client('manager','Manager@123')
 assert employee('employees')[1][0]['id']==2

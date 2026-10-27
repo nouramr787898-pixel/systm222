@@ -1,13 +1,15 @@
 """EHKAM HR Portal - local functional prototype. Run: python server.py"""
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import sqlite3, json, os, hashlib, hmac, secrets, datetime, csv, io, threading, re, time, ssl, smtplib, urllib.request, urllib.parse, urllib.error, base64, html
+import sqlite3, json, os, hashlib, hmac, secrets, datetime, csv, io, threading, re, time, ssl, smtplib, urllib.request, urllib.parse, urllib.error, base64, html, math
 from email.message import EmailMessage
 from http.cookies import SimpleCookie
 from pathlib import Path
 
 BASE=Path(__file__).resolve().parent
-DB=BASE/'ehkam_data.sqlite3'
+DB=Path(os.environ.get('EHKAM_DB_PATH', str(BASE/'ehkam_data.sqlite3')))
+MAX_ATTACHMENT_SIZE=2*1024*1024
+MAX_ATTACHMENTS=3
 SESSIONS={}
 LOCK=threading.Lock()
 RESET_ATTEMPTS={}
@@ -27,11 +29,20 @@ def conn():
  c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');return c
 
 def init():
+ # SQLite backup API preserves a consistent pre-migration copy, including WAL data.
+ if DB.exists():
+  with conn() as existing:
+   has_migrations=existing.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone()
+   migrated=has_migrations and existing.execute("SELECT 1 FROM schema_migrations WHERE version='workflow-v1'").fetchone()
+   if not migrated:
+    backup=DB.with_name(DB.name+'.before-workflow-v1.bak')
+    if backup.exists():raise RuntimeError('Migration backup already exists; inspect before retrying')
+    with sqlite3.connect(backup) as target:existing.backup(target)
  c=conn();c.executescript('''
  CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL, name_en TEXT DEFAULT '',contract_end TEXT,city TEXT DEFAULT '', address TEXT DEFAULT '', latitude REAL, longitude REAL, geofence_radius REAL NOT NULL DEFAULT 100, archived INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','manager','employee')),employee_id INTEGER,company_id INTEGER);
  CREATE TABLE IF NOT EXISTS employees(id INTEGER PRIMARY KEY,company_id INTEGER NOT NULL REFERENCES companies(id),name TEXT NOT NULL,name_en TEXT DEFAULT '',employee_no TEXT NOT NULL, identity_no TEXT DEFAULT '',job TEXT DEFAULT '',department TEXT DEFAULT '',manager_id INTEGER, status TEXT NOT NULL DEFAULT 'نشط',hire_date TEXT, contract_start TEXT,contract_end TEXT,basic REAL NOT NULL DEFAULT 0,housing REAL NOT NULL DEFAULT 0,transport REAL NOT NULL DEFAULT 0,other REAL NOT NULL DEFAULT 0,annual_entitlement REAL NOT NULL DEFAULT 21,carryover REAL NOT NULL DEFAULT 0,monthly_grant REAL NOT NULL DEFAULT 0,workweek TEXT NOT NULL DEFAULT '0,1,2,3,5,6', work_start TEXT NOT NULL DEFAULT '09:00',work_end TEXT NOT NULL DEFAULT '17:00',payment_method TEXT NOT NULL DEFAULT 'bank',archived INTEGER NOT NULL DEFAULT 0,UNIQUE(company_id,employee_no));
- CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY,company_id INTEGER NOT NULL,employee_id INTEGER NOT NULL,type TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'new',start_date TEXT,end_date TEXT,days REAL DEFAULT 0,amount REAL DEFAULT 0,installment REAL DEFAULT 0,reason TEXT DEFAULT '',notes TEXT DEFAULT '',created_by INTEGER NOT NULL,approver_id INTEGER,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,decision_note TEXT DEFAULT '');
+ CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY,company_id INTEGER NOT NULL,employee_id INTEGER NOT NULL,type TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'new',start_date TEXT,end_date TEXT,days REAL DEFAULT 0,amount REAL DEFAULT 0,installment REAL DEFAULT 0,notes TEXT DEFAULT '',created_by INTEGER NOT NULL,approver_id INTEGER,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,decision_note TEXT DEFAULT '');
  CREATE TABLE IF NOT EXISTS attendance(id INTEGER PRIMARY KEY,employee_id INTEGER NOT NULL,day TEXT NOT NULL,check_in TEXT,check_out TEXT,source TEXT DEFAULT 'demo',UNIQUE(employee_id,day));
  CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,user_id INTEGER, username TEXT, action TEXT NOT NULL, entity TEXT NOT NULL,entity_id INTEGER, info TEXT, timestamp TEXT NOT NULL);
  ''')
@@ -61,7 +72,91 @@ def init():
   if col not in reset_columns:c.execute('ALTER TABLE password_resets ADD COLUMN '+col+' TEXT DEFAULT NULL')
  for col in ('email_verified','whatsapp_attempts','whatsapp_sent'):
   if col not in {row[1] for row in c.execute('PRAGMA table_info(password_resets)')}:c.execute('ALTER TABLE password_resets ADD COLUMN '+col+' INTEGER NOT NULL DEFAULT 0')
+ if not c.in_transaction:c.execute('BEGIN IMMEDIATE')
+ migrate_workflow(c)
  c.commit();c.close()
+
+def migrate_workflow(c):
+ c.execute('CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY)')
+ if c.execute("SELECT 1 FROM schema_migrations WHERE version='workflow-v1'").fetchone():return
+ c.execute('CREATE TABLE employee_number_history(employee_id INTEGER PRIMARY KEY REFERENCES employees(id),old_number TEXT NOT NULL,new_number TEXT NOT NULL)')
+ c.execute('CREATE TABLE employee_number_sequence(id INTEGER PRIMARY KEY CHECK(id=1),value INTEGER NOT NULL)')
+ rows=c.execute('SELECT id,employee_no FROM employees ORDER BY id').fetchall()
+ used=set();assigned={}
+ # Keep the first occurrence of each already canonical number across all companies.
+ for row in rows:
+  no=row['employee_no']
+  if re.fullmatch(r'EH-[0-9]{4,}',no) and int(no[3:])>0 and no==f"EH-{int(no[3:]):04d}" and no not in used:
+   used.add(no);assigned[row['id']]=no
+ next_no=1
+ for row in rows:
+  if row['id'] in assigned:continue
+  while f'EH-{next_no:04d}' in used:next_no+=1
+  no=f'EH-{next_no:04d}';used.add(no);assigned[row['id']]=no
+ # Temporary unique names avoid collisions with old company-scoped constraints.
+ prefix='migration-'+secrets.token_hex(16)+'-'
+ for row in rows:c.execute('UPDATE employees SET employee_no=? WHERE id=?',(prefix+str(row['id']),row['id']))
+ for row in rows:
+  no=assigned[row['id']]
+  c.execute('UPDATE employees SET employee_no=? WHERE id=?',(no,row['id']))
+  c.execute('INSERT INTO employee_number_history VALUES(?,?,?)',(row['id'],row['employee_no'],no))
+ c.execute('CREATE UNIQUE INDEX employees_number_global ON employees(employee_no)')
+ c.execute('INSERT INTO employee_number_sequence VALUES(1,?)',(max([int(x[3:]) for x in used],default=0),))
+ # Move legacy reasons into notes before dropping the obsolete field.
+ if 'reason' in {row[1] for row in c.execute('PRAGMA table_info(requests)')}:
+  c.execute("UPDATE requests SET notes=CASE WHEN trim(COALESCE(reason,''))='' THEN notes WHEN trim(COALESCE(notes,''))='' THEN reason ELSE notes || char(10) || reason END")
+  c.execute('ALTER TABLE requests DROP COLUMN reason')
+ c.execute('CREATE TABLE request_attachments(id INTEGER PRIMARY KEY,request_id INTEGER NOT NULL REFERENCES requests(id),name TEXT NOT NULL,mime TEXT NOT NULL,content BLOB NOT NULL)')
+ c.execute('CREATE TABLE request_decisions(id INTEGER PRIMARY KEY,request_id INTEGER NOT NULL REFERENCES requests(id),user_id INTEGER NOT NULL REFERENCES users(id),username TEXT NOT NULL,status TEXT NOT NULL,note TEXT NOT NULL,decided_at TEXT NOT NULL)')
+ # Recover historical actors/times only where the original audit record exists.
+ c.execute("INSERT INTO request_decisions(request_id,user_id,username,status,note,decided_at) SELECT a.entity_id,a.user_id,COALESCE(a.username,''),substr(a.action,8),COALESCE(a.info,''),a.timestamp FROM audit a JOIN requests r ON r.id=a.entity_id JOIN users u ON u.id=a.user_id WHERE a.entity='request' AND a.action IN ('status_review','status_approved','status_rejected','status_cancelled','status_closed','status_accepted','status_declined') ORDER BY a.id")
+ c.execute('CREATE INDEX attachments_by_request ON request_attachments(request_id)')
+ c.execute('CREATE INDEX decisions_by_request ON request_decisions(request_id)')
+ c.execute("INSERT INTO schema_migrations VALUES('workflow-v1')")
+
+
+def normalize_date(value):
+ if value is None or value=='':return None
+ value=str(value).strip()
+ try:
+  if re.fullmatch(r'\d{2}/\d{2}/\d{4}',value):
+   day,month,year=map(int,value.split('/'));return datetime.date(year,month,day).isoformat()
+  return datetime.date.fromisoformat(value).isoformat()
+ except ValueError:fail('تاريخ غير صالح؛ استخدم يوم/شهر/سنة')
+
+
+def normalize_employee_fields(d):
+ for key in ('hire_date','contract_start','contract_end'):
+  if key in d:d[key]=normalize_date(d[key])
+ if d.get('contract_start') and d.get('contract_end') and d['contract_end']<d['contract_start']:fail('نهاية العقد قبل بدايته')
+ if 'workweek' in d:
+  parts=str(d['workweek']).split(',')
+  if not parts or any(x not in '0123456' or len(x)!=1 for x in parts):fail('أيام العمل غير صحيحة')
+  d['workweek']=','.join(sorted(set(parts)))
+ if 'manager_id' in d:d['manager_id']=d['manager_id'] or None
+ return d
+
+
+def validate_attachments(items):
+ if not isinstance(items,list) or len(items)>MAX_ATTACHMENTS:fail('يسمح بثلاثة مرفقات كحد أقصى')
+ result=[]
+ for item in items:
+  if not isinstance(item,dict):fail('المرفق غير صالح')
+  name=item.get('name');encoded=item.get('data');mime=item.get('mime')
+  if not isinstance(name,str) or not name or len(name)>180 or any(ch in name for ch in ('/','\\')) or any(ord(ch)<32 or ord(ch)==127 for ch in name):fail('اسم المرفق غير صالح')
+  if not isinstance(encoded,str) or len(encoded)>((MAX_ATTACHMENT_SIZE+2)//3)*4:fail('حجم المرفق يتجاوز 2 ميجابايت')
+  try:content=base64.b64decode(encoded,validate=True)
+  except ValueError:fail('ترميز المرفق غير صالح')
+  suffix=Path(name).suffix.lower()
+  valid=(mime=='image/png' and suffix=='.png' and content.startswith(b'\x89PNG\r\n\x1a\n')) or (mime=='image/jpeg' and suffix in ('.jpg','.jpeg') and content.startswith(b'\xff\xd8\xff')) or (mime=='application/pdf' and suffix=='.pdf' and content.startswith(b'%PDF-'))
+  if not content or len(content)>MAX_ATTACHMENT_SIZE or not valid:fail('المرفقات المقبولة PNG وJPG وPDF حتى 2 ميجابايت لكل ملف')
+  result.append((name,mime,content))
+ return result
+
+
+def request_access(c,u,r):
+ user_allowed_emp(c,u,r['employee_id'])
+ if r['type']=='hr_contact' and u['role']!='admin' and r['employee_id']!=u['employee_id']:fail('مراسلات الموارد البشرية خاصة بالموظف والإدارة',403)
 
 class AuthevoServiceError(Exception):
  def __init__(self,code,status=None):
@@ -225,21 +320,29 @@ def visible_requests(c,u):
  q='''SELECT r.*,e.name employee_name,e.employee_no,c.name company_name FROM requests r JOIN employees e ON e.id=r.employee_id JOIN companies c ON c.id=r.company_id WHERE 1=1''';p=[]
  if u['role']=='employee':q+=' AND r.employee_id=?';p=[u['employee_id']]
  elif u['role']=='manager':q+=' AND r.company_id=? AND (e.manager_id=? OR r.employee_id=?)';p=[u['company_id'],u['employee_id'],u['employee_id']]
+ if u['role']!='admin':q+=" AND (r.type!='hr_contact' OR r.employee_id=?)";p.append(u['employee_id'])
  q+=' ORDER BY r.id DESC'
- return [dict(x) for x in c.execute(q,p)]
+ rows=[dict(x) for x in c.execute(q,p)]
+ for row in rows:
+  row['attachments']=[dict(x) for x in c.execute('SELECT id,name,mime,length(content) size FROM request_attachments WHERE request_id=?',(row['id'],))]
+  row['decisions']=[dict(x) for x in c.execute('SELECT user_id,username,status,note,decided_at FROM request_decisions WHERE request_id=? ORDER BY id',(row['id'],))]
+ return rows
 
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*a):pass
  def write(self,data,status=200,ctype='application/json',headers=None):
   if isinstance(data,(dict,list)):data=json.dumps(data,ensure_ascii=False).encode()
   elif isinstance(data,str):data=data.encode()
-  self.send_response(status);self.send_header('Content-Type',ctype+'; charset=utf-8');self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store')
+  self.send_response(status);self.send_header('Content-Type',ctype+('; charset=utf-8' if ctype.startswith('text/') or ctype=='application/json' else ''));self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store')
   for k,v in (headers or {}).items():self.send_header(k,v)
   self.end_headers();self.wfile.write(data)
  def input(self):
   n=int(self.headers.get('Content-Length','0'))
-  if n>1024*1024:fail('الطلب كبير جدًا',413)
-  try:return json.loads(self.rfile.read(n) or b'{}')
+  if n<0 or n>9*1024*1024:fail('الطلب كبير جدًا',413)
+  try:
+   data=json.loads(self.rfile.read(n) or b'{}')
+   if not isinstance(data,dict):fail('بيانات JSON يجب أن تكون كائنًا')
+   return data
   except Exception:fail('بيانات JSON غير صالحة')
  def actor(self,c):
   cookie=SimpleCookie();cookie.load(self.headers.get('Cookie',''))
@@ -414,14 +517,16 @@ class Handler(BaseHTTPRequestHandler):
     if lat is None or lon is None:fail('تحديد خط العرض وخط الطول مطلوب لتفعيل البصمة الجغرافية')
     if not (-90<=lat<=90 and -180<=lon<=180):fail('إحداثيات الموقع خارج النطاق الصحيح')
     if not (20<=radius<=1000):fail('نطاق البصمة يجب أن يكون بين 20 و1000 متر')
-    cursor=c.execute('INSERT INTO companies(name,name_en,contract_end,city,address,latitude,longitude,geofence_radius) VALUES(?,?,?,?,?,?,?,?)',(name,d.get('name_en',''),d.get('contract_end'),d.get('city',''),d.get('address',''),lat,lon,radius))
+    cursor=c.execute('INSERT INTO companies(name,name_en,contract_end,city,address,latitude,longitude,geofence_radius) VALUES(?,?,?,?,?,?,?,?)',(name,d.get('name_en',''),normalize_date(d.get('contract_end')),d.get('city',''),d.get('address',''),lat,lon,radius))
     record(c,u,'create','company',cursor.lastrowid,name);c.commit();return self.write({'ok':True},201)
    if path=='/api/employees' and method=='GET':return self.write(visible_employees(c,u,True))
    if path=='/api/employees' and method=='POST':
     if u['role']!='admin':fail('غير مصرح',403)
-    d=self.input();co=int(d.get('company_id',0));exists=c.execute('SELECT id FROM companies WHERE id=? AND archived=0',(co,)).fetchone()
+    d=normalize_employee_fields(self.input());co=int(d.get('company_id',0));c.execute('BEGIN IMMEDIATE');exists=c.execute('SELECT id FROM companies WHERE id=? AND archived=0',(co,)).fetchone()
     if not exists:fail('الشركة غير موجودة')
-    if not d.get('name') or not d.get('employee_no'):fail('الاسم والرقم الوظيفي مطلوبان')
+    if not str(d.get('name','')).strip():fail('الاسم مطلوب')
+    number=c.execute('UPDATE employee_number_sequence SET value=value+1 WHERE id=1 RETURNING value').fetchone()[0]
+    d['employee_no']=f'EH-{number:04d}'
     country,phone,email=clean_contacts(d)
     username=str(d.get('login_username','')).strip();newpw=str(d.get('login_password',''))
     if not username or len(newpw)<10 or len(newpw)>128 or not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}',username):fail('اسم دخول إنجليزي 3–64 حرف وكلمة مرور لا تقل عن 10 أحرف مطلوبان')
@@ -435,19 +540,21 @@ class Handler(BaseHTTPRequestHandler):
     try:cur=c.execute('INSERT INTO employees('+','.join(keys)+') VALUES('+','.join('?' for _ in keys)+')',values)
     except sqlite3.IntegrityError:fail('رقم الموظف مستخدم داخل هذه الشركة')
     c.execute('INSERT INTO users(username,password_hash,role,employee_id,company_id) VALUES(?,?,?,?,?)',(username,hashpw(newpw),'employee',cur.lastrowid,co))
-    record(c,u,'create','employee',cur.lastrowid,d['name']);c.commit();return self.write({'id':cur.lastrowid},201)
+    record(c,u,'create','employee',cur.lastrowid,d['name']);c.commit();return self.write({'id':cur.lastrowid,'employee_no':d['employee_no']},201)
    if path.startswith('/api/employees/') and method=='POST':
     if u['role']!='admin':fail('غير مصرح',403)
-    eid=int(path.rsplit('/',1)[1]);e=user_allowed_emp(c,u,eid);d=self.input()
+    eid=int(path.rsplit('/',1)[1]);e=user_allowed_emp(c,u,eid);d=normalize_employee_fields(self.input())
     permitted={'photo','name','name_en','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method'}
     changes={k:v for k,v in d.items() if k in permitted}
+    start=changes.get('contract_start',e['contract_start']);end=changes.get('contract_end',e['contract_end'])
+    if start and end and end<start:fail('نهاية العقد قبل بدايته')
     if not changes:fail('لا توجد بيانات للتعديل')
     if 'photo' in changes:
      photo=changes['photo']
      if photo is not None and (not isinstance(photo,str) or len(photo)>300000 or not photo.startswith(('data:image/png;base64,','data:image/jpeg;base64,','data:image/webp;base64,'))):fail('صيغة الصورة غير مقبولة أو حجمها كبير')
     if changes.get('manager_id'):
      m=c.execute('SELECT company_id FROM employees WHERE id=?',(changes['manager_id'],)).fetchone()
-     if not m or m['company_id']!=e['company_id']:fail('المشرف يجب أن يتبع نفس الشركة')
+     if int(changes['manager_id'])==eid or not m or m['company_id']!=e['company_id']:fail('المشرف يجب أن يتبع نفس الشركة')
     c.execute('UPDATE employees SET '+','.join(k+'=?' for k in changes)+' WHERE id=?',list(changes.values())+[eid]);record(c,u,'update','employee',eid,','.join(changes));c.commit();return self.write({'ok':True})
    if path.startswith('/api/leave/') and method=='GET':
     eid=int(path.rsplit('/',1)[1]);e=user_allowed_emp(c,u,eid);return self.write(leave(c,e))
@@ -455,15 +562,30 @@ class Handler(BaseHTTPRequestHandler):
     qs=parse_qs(urlparse(self.path).query);eid=int(qs.get('employee_id',[u['employee_id'] or 0])[0]);e=user_allowed_emp(c,u,eid)
     months=remaining_months(e['contract_end'],TODAY());gross=salary(e);monthly_limit=round(gross*.35,2)
     return self.write({'gross_salary':gross,'remaining_months':months,'max_monthly_installment':monthly_limit,'max_advance':round(monthly_limit*months,2),'contract_end':e['contract_end']})
+   if path.startswith('/api/attachments/') and method=='GET':
+    aid=int(path.rsplit('/',1)[1])
+    attachment=c.execute('SELECT * FROM request_attachments WHERE id=?',(aid,)).fetchone()
+    if not attachment:fail('المرفق غير موجود',404)
+    r=c.execute('SELECT * FROM requests WHERE id=?',(attachment['request_id'],)).fetchone()
+    request_access(c,u,r)
+    filename=urllib.parse.quote(attachment['name'],safe='')
+    return self.write(attachment['content'],ctype=attachment['mime'],headers={'Content-Disposition':"attachment; filename*=UTF-8''"+filename,'X-Content-Type-Options':'nosniff'})
    if path=='/api/requests' and method=='GET':return self.write(visible_requests(c,u))
    if path=='/api/requests' and method=='POST':
-    d=self.input();eid=int(d.get('employee_id',u['employee_id'] or 0));e=user_allowed_emp(c,u,eid)
-    if u['role']=='manager' and d.get('type')!='delegation':fail('المدير ينشئ الانتداب فقط',403)
+    d=self.input();c.execute('BEGIN IMMEDIATE');eid=int(d.get('employee_id',u['employee_id'] or 0));e=user_allowed_emp(c,u,eid)
+    if u['role']=='manager' and d.get('type') not in ('delegation','hr_contact'):fail('المشرف ينشئ الانتداب أو مراسلته الشخصية للموارد البشرية فقط',403)
     if u['role']=='employee' and eid!=u['employee_id']:fail('غير مصرح',403)
     if u['role']!='manager' and d.get('type')=='delegation':fail('الانتداب يبدأ من المشرف فقط',403)
+    if d.get('type')=='hr_contact' and u['role']!='admin' and eid!=u['employee_id']:fail('يمكنك إرسال مراسلتك الشخصية فقط',403)
+    attachments=validate_attachments(d.get('attachments',[]))
     typ=d.get('type');allowed={'annual_leave','sick_leave','unpaid_leave','advance','permission','punch_fix','hr_contact','investigation','termination','delegation','open'}
     if typ not in allowed:fail('نوع الطلب غير صالح')
-    a=d.get('start_date') or None;b=d.get('end_date') or None;days=0;amount=float(d.get('amount') or 0);inst=float(d.get('installment') or 0)
+    a=normalize_date(d.get('start_date'));b=normalize_date(d.get('end_date'));days=0;amount=0;inst=0
+    if a and b and b<a:fail('تاريخ النهاية قبل البداية')
+    if typ=='advance':
+     try:amount=float(d.get('amount') or 0);inst=float(d.get('installment') or 0)
+     except (ValueError,TypeError):fail('مبلغ السلفة والقسط غير صحيحين')
+     if not math.isfinite(amount) or not math.isfinite(inst):fail('مبلغ السلفة والقسط غير صحيحين')
     if typ in ('annual_leave','sick_leave','unpaid_leave','permission','delegation'):
      if not a or not b:fail('تاريخ البداية والنهاية مطلوبان')
      days=business_days(e,a,b)
@@ -474,19 +596,22 @@ class Handler(BaseHTTPRequestHandler):
      limit=round(salary(e)*.35*remaining_months(e['contract_end'],TODAY()),2)
      if amount<=0 or amount>limit:fail('طلب السلفة يتجاوز الحد المستحق: '+str(limit)+' ريال')
      if inst<=0 or inst>salary(e)*.35:fail('القسط الشهري يتجاوز 35% من الراتب')
-    if typ=='sick_leave' and not d.get('notes'):fail('أدخل تفاصيل المستند الطبي (رفع الملفات غير متاح في النموذج الأولي)')
+    if typ=='sick_leave' and not d.get('notes') and not attachments:fail('أضف ملاحظات أو مستندًا طبيًا')
     if typ=='punch_fix' and not a:fail('تاريخ التصحيح مطلوب')
     if typ=='delegation' and u['employee_id']!=e['manager_id']:fail('يمكن للمشرف إصدار انتداب لموظفيه فقط')
-    ts=now();cur=c.execute('''INSERT INTO requests(company_id,employee_id,type,start_date,end_date,days,amount,installment,reason,notes,created_by,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(e['company_id'],eid,typ,a,b,days,amount,inst,d.get('reason',''),d.get('notes',''),u['id'],e['manager_id'],ts,ts))
+    ts=now();cur=c.execute('''INSERT INTO requests(company_id,employee_id,type,start_date,end_date,days,amount,installment,notes,created_by,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',(e['company_id'],eid,typ,a,b,days,amount,inst,str(d.get('notes','')),u['id'],e['manager_id'],ts,ts))
+    for name,mime,content in attachments:c.execute('INSERT INTO request_attachments(request_id,name,mime,content) VALUES(?,?,?,?)',(cur.lastrowid,name,mime,content))
     record(c,u,'create','request',cur.lastrowid,typ);c.commit();return self.write({'id':cur.lastrowid,'number':f'EH-{cur.lastrowid:06d}'},201)
    if path.startswith('/api/requests/') and method=='POST':
-    rid=int(path.rsplit('/',1)[1]);d=self.input();r=c.execute('SELECT * FROM requests WHERE id=?',(rid,)).fetchone()
+    rid=int(path.rsplit('/',1)[1]);d=self.input();c.execute('BEGIN IMMEDIATE');r=c.execute('SELECT * FROM requests WHERE id=?',(rid,)).fetchone()
     if not r:fail('الطلب غير موجود',404)
-    e=user_allowed_emp(c,u,r['employee_id']);action=d.get('status')
+    request_access(c,u,r);e=user_allowed_emp(c,u,r['employee_id']);action=d.get('status')
+    note=str(d.get('note') or '').strip()
+    if action in ('rejected','declined') and not note:fail('سبب الرفض مطلوب')
     if action not in ('review','approved','rejected','cancelled','closed','accepted','declined'):fail('حالة غير صحيحة')
     if r['status'] not in ('new','review') and not (action=='cancelled' and r['status']=='approved'):fail('لا يمكن تغيير هذه الحالة')
     if action in ('review','approved','rejected','closed'):
-     if u['role']=='employee':fail('لا يمكن اعتماد طلبك',403)
+     if u['role']=='employee' or u['employee_id']==e['id']:fail('لا يمكن اعتماد طلبك',403)
      if u['role']=='manager' and e['manager_id']!=u['employee_id']:fail('ليس من موظفيك',403)
      if r['type']=='delegation':fail('الانتداب ينتظر قبول أو رفض الموظف')
     if action in ('accepted','declined'):
@@ -495,17 +620,20 @@ class Handler(BaseHTTPRequestHandler):
     if action=='cancelled' and u['role']!='admin':fail('إلغاء الطلب المعتمد متاح للإدارة فقط في النموذج الأولي',403)
     if action=='approved' and r['type']=='annual_leave':
      if r['days']>leave(c,e)['available']:fail('الرصيد غير كافٍ عند الاعتماد')
-    c.execute('UPDATE requests SET status=?,decision_note=?,updated_at=? WHERE id=?',(action,d.get('note',''),now(),rid))
+    stamp=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
+    c.execute('UPDATE requests SET status=?,decision_note=?,updated_at=? WHERE id=?',(action,note,stamp,rid))
+    c.execute('INSERT INTO request_decisions(request_id,user_id,username,status,note,decided_at) VALUES(?,?,?,?,?,?)',(rid,u['id'],u['username'],action,note,stamp))
     if action=='approved' and r['type']=='punch_fix' and r['start_date']:
      c.execute('''INSERT INTO attendance(employee_id,day,check_in,check_out,source) VALUES(?,?,?,?,?) ON CONFLICT(employee_id,day) DO UPDATE SET check_in=COALESCE(attendance.check_in,excluded.check_in),check_out=COALESCE(attendance.check_out,excluded.check_out),source=excluded.source''',(e['id'],r['start_date'],e['work_start'],e['work_end'],'approved_punch_fix'))
     record(c,u,'status_'+action,'request',rid,d.get('note',''));c.commit();return self.write({'ok':True})
    if path=='/api/attendance' and method=='GET':
     qs=parse_qs(urlparse(self.path).query);eid=int(qs.get('employee_id',[u['employee_id'] or 0])[0]);user_allowed_emp(c,u,eid)
     q='SELECT * FROM attendance WHERE employee_id=?';p=[eid]
-    if qs.get('from'):q+=' AND day>=?';p.append(qs['from'][0])
-    if qs.get('to'):q+=' AND day<=?';p.append(qs['to'][0])
+    if qs.get('from'):q+=' AND day>=?';p.append(normalize_date(qs['from'][0]))
+    if qs.get('to'):q+=' AND day<=?';p.append(normalize_date(qs['to'][0]))
     return self.write([dict(x) for x in c.execute(q+' ORDER BY day DESC',p)])
    if path=='/api/attendance' and method=='POST':
+    c.execute('BEGIN IMMEDIATE')
     if u['role']!='employee':fail('تسجيل البصمة من حساب الموظف فقط',403)
     if not u['employee_id']:fail('حساب الموظف غير مرتبط بملف وظيفي',403)
     d=self.input()
@@ -513,11 +641,10 @@ class Handler(BaseHTTPRequestHandler):
      lat=float(d.get('latitude'));lon=float(d.get('longitude'));accuracy=float(d.get('accuracy',9999))
     except (TypeError,ValueError):fail('تعذر قراءة الموقع الجغرافي من الجهاز')
     if not (-90<=lat<=90 and -180<=lon<=180):fail('إحداثيات الموقع غير صحيحة')
-    if accuracy<0 or accuracy>100:fail('دقة الموقع ضعيفة. شغّل GPS وحاول مرة أخرى في مكان مفتوح')
+    if not math.isfinite(accuracy) or accuracy<0 or accuracy>100:fail('دقة الموقع ضعيفة. شغّل GPS وحاول مرة أخرى في مكان مفتوح')
     e=c.execute('SELECT e.*,co.latitude company_lat,co.longitude company_lon,co.geofence_radius,co.address company_address FROM employees e JOIN companies co ON co.id=e.company_id WHERE e.id=? AND e.archived=0 AND co.archived=0',(u['employee_id'],)).fetchone()
     if not e:fail('ملف الموظف أو الشركة غير متاح',403)
     if e['company_lat'] is None or e['company_lon'] is None:fail('لم يحدد المدير موقع الشركة بعد')
-    import math
     r=6371000.0
     p1=math.radians(lat);p2=math.radians(float(e['company_lat']))
     dp=math.radians(float(e['company_lat'])-lat);dl=math.radians(float(e['company_lon'])-lon)
@@ -560,6 +687,7 @@ class Handler(BaseHTTPRequestHandler):
     data='\ufeff'+output.getvalue();return self.write(data,ctype='text/csv',headers={'Content-Disposition':'attachment; filename="employees.csv"'})
    fail('المسار غير موجود',404)
   except AppError as x:self.write({'error':x.msg},x.status)
+  except (ValueError,TypeError):self.write({'error':'قيمة غير صالحة في الطلب'},400)
   except Exception as x:
    print('Server error:',repr(x));self.write({'error':'خطأ داخلي؛ راجع مخرجات الخادم'},500)
   finally:c.close()

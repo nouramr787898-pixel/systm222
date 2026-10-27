@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 *.sqlite3
 .env
+*.sqlite3.before-workflow-*.bak
+*.sqlite3-wal
+*.sqlite3-shm
