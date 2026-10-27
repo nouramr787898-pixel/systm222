@@ -29,7 +29,16 @@ def conn():
  c=sqlite3.connect(DB,timeout=15)
  c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');return c
 
-def init():
+def validate_runtime_database():
+ required=bool(os.environ.get('RAILWAY_ENVIRONMENT_ID') or os.environ.get('RAILWAY_SERVICE_ID') or os.environ.get('RAILWAY_PROJECT_ID') or os.environ.get('EHKAM_REQUIRE_EXISTING_DB')=='1')
+ if not required:return
+ if not DB.is_file():raise RuntimeError('Existing database not found. Deployment stopped; configure EHKAM_DB_PATH to the existing persistent database. No database was created.')
+ with sqlite3.connect(DB.resolve().as_uri()+'?mode=ro',uri=True) as existing:
+  if existing.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise RuntimeError('Existing database integrity check failed; inspect a backup before migration.')
+  if not existing.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").fetchone() or not existing.execute('SELECT 1 FROM users LIMIT 1').fetchone():
+   raise RuntimeError('Existing account database required. Deployment stopped without creating demo users.')
+
+def init(seeder=None):
  # SQLite backup API preserves a consistent pre-migration copy, including WAL data.
  if DB.exists():
   with conn() as existing:
@@ -56,21 +65,12 @@ def init():
  CREATE TABLE IF NOT EXISTS attendance(id INTEGER PRIMARY KEY,employee_id INTEGER NOT NULL,day TEXT NOT NULL,check_in TEXT,check_out TEXT,source TEXT DEFAULT 'demo',UNIQUE(employee_id,day));
  CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,user_id INTEGER, username TEXT, action TEXT NOT NULL, entity TEXT NOT NULL,entity_id INTEGER, info TEXT, timestamp TEXT NOT NULL);
  ''')
- if not c.execute('SELECT 1 FROM users LIMIT 1').fetchone():
-  c.execute('INSERT INTO companies(name,name_en,contract_end,city) VALUES(?,?,?,?)',('شركة الأفق','Al Ofoq Co','2027-12-31','الرياض'))
-  co=c.execute('SELECT last_insert_rowid()').fetchone()[0]
-  staff=[('أحمد محمد','Ahmed Mohammed','A-001','مدير موارد بشرية','الموارد البشرية',None,5200,1000,400,0,'2026-01-01','2027-01-01',0),('سارة خالد','Sara Khalid','A-002','أخصائي موارد بشرية','الموارد البشرية',1,4000,0,0,25,'2026-01-01','2027-01-01',0),('خالد علي','Khalid Ali','A-003','محاسب','المالية',1,3500,800,200,8,'2026-05-01','2027-05-01',0)]
-  for name,en,no,job,dep,manager,basic,housing,trans,carry,start,end,arch in staff:
-   c.execute('''INSERT INTO employees(company_id,name,name_en,employee_no,job,department,manager_id,basic,housing,transport,carryover,hire_date,contract_start,contract_end,archived) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(co,name,en,no,job,dep,manager,basic,housing,trans,carry,start,start,end,arch))
-  for username,pw,role,eid in [('admin','Admin@123','admin',None),('manager','Manager@123','manager',1),('employee','Employee@123','employee',2)]:
-   c.execute('INSERT INTO users(username,password_hash,role,employee_id,company_id) VALUES(?,?,?,?,?)',(username,hashpw(pw),role,eid,co if role!='admin' else None))
+ if seeder is not None and not c.execute('SELECT 1 FROM users LIMIT 1').fetchone():seeder(c)
 
  # Add company geofence fields to older installations safely.
  company_columns={row[1] for row in c.execute('PRAGMA table_info(companies)')}
  for col,decl in (('address',"TEXT DEFAULT ''"),('latitude','REAL'),('longitude','REAL'),('geofence_radius','REAL NOT NULL DEFAULT 100')):
   if col not in company_columns:c.execute('ALTER TABLE companies ADD COLUMN '+col+' '+decl)
- # The supplied Google Maps pin is a TEST location for the sample company only.
- c.execute("UPDATE companies SET address=CASE WHEN address='' THEN 'موقع تجريبي من رابط Google Maps' ELSE address END, latitude=COALESCE(latitude,30.1390381), longitude=COALESCE(longitude,31.2558794), geofence_radius=CASE WHEN geofence_radius IS NULL OR geofence_radius<=0 THEN 100 ELSE geofence_radius END WHERE name='شركة الأفق' AND latitude IS NULL AND longitude IS NULL")
  # Add employee profile photo column to older installations safely.
  columns={row[1] for row in c.execute('PRAGMA table_info(employees)')}
  if 'photo' not in columns:c.execute('ALTER TABLE employees ADD COLUMN photo TEXT DEFAULT NULL')
@@ -378,6 +378,17 @@ class Handler(BaseHTTPRequestHandler):
  def do_POST(self):self.process('POST')
  def process(self,method):
   path=urlparse(self.path).path
+  if method=='GET' and path=='/api/health':
+   try:
+    health=sqlite3.connect(DB.resolve().as_uri()+'?mode=ro',uri=True)
+    try:
+     ready=health.execute("SELECT 1 FROM schema_migrations WHERE version='hr-v2'").fetchone()
+     health.execute('SELECT 1 FROM users LIMIT 1').fetchone()
+    finally:health.close()
+    if not ready:raise RuntimeError('schema_not_ready')
+    revision=os.environ.get('RAILWAY_GIT_COMMIT_SHA','')
+    return self.write({'status':'ok','release':'hr-reviewed-v2','database':'ok','commit':revision if re.fullmatch(r'[0-9a-fA-F]{40}',revision) else None})
+   except (sqlite3.Error,RuntimeError):return self.write({'status':'unavailable','release':'hr-reviewed-v2'},503)
   if method=='GET' and path in ('/','/index.html'):
    return self.write((BASE/'index.html').read_bytes(),ctype='text/html')
   if method=='GET' and path=='/style.css':return self.write((BASE/'style.css').read_bytes(),ctype='text/css')
@@ -803,6 +814,6 @@ class Handler(BaseHTTPRequestHandler):
   finally:c.close()
 
 if __name__=='__main__':
- init();port=int(os.environ.get('PORT','8765'))
+ validate_runtime_database();init();port=int(os.environ.get('PORT','8765'))
  print(f'EHKAM working local server: http://127.0.0.1:{port}');# Never print credentials into public hosting logs
  ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()

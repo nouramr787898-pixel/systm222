@@ -254,6 +254,13 @@ class HRTests(unittest.TestCase):
         self.assertEqual(self.admin('archive',{'target':'employee','id':2,'archived':False,'confirm':True,'password':'Admin@123'})[0],200)
         self.assertEqual(self.employee('me')[0],200)
 
+    def test_public_health_identifies_release_without_private_data(self):
+        import urllib.request
+        with urllib.request.urlopen(self.base+'health') as response:result=json.load(response)
+        self.assertEqual(result['status'],'ok')
+        self.assertEqual(result['release'],'hr-reviewed-v2')
+        self.assertEqual(set(result),{'status','release','database','commit'})
+
     def test_otp_email_or_phone_with_mocked_providers(self):
         self.assertEqual(self.admin('employees/2',{'email':'demo@example.test','phone_country':'+20','phone_local':'1012345678'})[0],200)
         captured=[]

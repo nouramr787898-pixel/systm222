@@ -19,6 +19,18 @@ ACCOUNTS = [
 ]
 
 
+def seed_fixture(c):
+ """Public test-only fixture; never invoked by normal production startup."""
+ c.execute('INSERT INTO companies(name,name_en,contract_end,city,address,latitude,longitude,geofence_radius) VALUES(?,?,?,?,?,?,?,?)',('شركة الأفق','Al Ofoq Co','2027-12-31','الرياض','موقع تجريبي',30.1390381,31.2558794,100))
+ co=c.execute('SELECT last_insert_rowid()').fetchone()[0]
+ staff=[('أحمد محمد','Ahmed Mohammed','A-001','مدير موارد بشرية','الموارد البشرية',None,5200,1000,400,0,'2026-01-01','2027-01-01',0),('سارة خالد','Sara Khalid','A-002','أخصائي موارد بشرية','الموارد البشرية',1,4000,0,0,25,'2026-01-01','2027-01-01',0),('خالد علي','Khalid Ali','A-003','محاسب','المالية',1,3500,800,200,8,'2026-05-01','2027-05-01',0)]
+ for name,en,no,job,dep,manager,basic,housing,trans,carry,start,end,arch in staff:
+  c.execute('''INSERT INTO employees(company_id,name,name_en,employee_no,job,department,manager_id,basic,housing,transport,carryover,hire_date,contract_start,contract_end,archived) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(co,name,en,no,job,dep,manager,basic,housing,trans,carry,start,start,end,arch))
+ for username,pw,role,eid in [('admin','Admin@123','admin',None),('manager','Manager@123','manager',1),('employee','Employee@123','employee',2)]:
+  c.execute('INSERT INTO users(username,password_hash,role,employee_id,company_id) VALUES(?,?,?,?,?)',(username,server.hashpw(pw),role,eid,co if role!='admin' else None))
+
+
+
 def prepare_demo(directory):
     """Never open the application database; reuse only a marked demo directory."""
     directory = Path(directory).resolve()
@@ -38,7 +50,7 @@ def prepare_demo(directory):
         return database
     # The path above is fixed to demo.sqlite3 in a separate directory.
     server.DB = database
-    server.init()
+    server.init(seeder=seed_fixture)
     today = datetime.date.today()
     start = today.replace(year=today.year - 1, day=1)
     end = today.replace(year=today.year + 2, day=1)

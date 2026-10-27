@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import demo
 import server
@@ -51,6 +52,29 @@ class DemoTests(unittest.TestCase):
         (Path(self.temp.name)/'ehkam-demo.json').write_text(json.dumps({'kind':'ehkam-isolated-demo-v1'}))
         with self.assertRaises(sqlite3.DatabaseError):demo.prepare_demo(self.temp.name)
         self.assertEqual(database.read_bytes(),original)
+
+    def test_production_missing_database_is_never_created(self):
+        server.DB=Path(self.temp.name)/'missing-production.sqlite3'
+        with patch.dict(server.os.environ,{'RAILWAY_SERVICE_ID':'test-service'}):
+            with self.assertRaises(RuntimeError):server.validate_runtime_database()
+        self.assertFalse(server.DB.exists())
+
+    def test_regular_initialization_does_not_create_demo_accounts(self):
+        server.DB=Path(self.temp.name)/'empty.sqlite3'
+        server.init()
+        with sqlite3.connect(server.DB) as c:
+            self.assertEqual(c.execute('SELECT count(*) FROM users').fetchone()[0],0)
+            self.assertEqual(c.execute('SELECT count(*) FROM employees').fetchone()[0],0)
+            self.assertEqual(c.execute('SELECT count(*) FROM companies').fetchone()[0],0)
+        with patch.dict(server.os.environ,{'RAILWAY_SERVICE_ID':'test-service'}):
+            with self.assertRaises(RuntimeError):server.validate_runtime_database()
+
+    def test_existing_production_database_is_checked_read_only(self):
+        server.DB=Path(self.temp.name)/'existing.sqlite3'
+        server.init(seeder=demo.seed_fixture)
+        original=server.DB.read_bytes()
+        with patch.dict(server.os.environ,{'RAILWAY_SERVICE_ID':'test-service'}):server.validate_runtime_database()
+        self.assertEqual(server.DB.read_bytes(),original)
 
 
 if __name__=='__main__':unittest.main()

@@ -6,3 +6,10 @@ __pycache__/
 *.sqlite3-wal
 *.sqlite3-shm
 *.sqlite3.before-hr-*.bak
+
+.env.*
+*.db
+*.pem
+*.key
+*.p12
+.railway/
