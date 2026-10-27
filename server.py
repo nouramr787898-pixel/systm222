@@ -72,7 +72,8 @@ def resend_send_reset(destination,code):
           'إذا لم تطلب استعادة كلمة المرور، تجاهل هذه الرسالة.')
  payload={'from':'إحكام الأعمال <'+sender+'>','to':[destination], 'subject':subject, 'text':content}
  req=urllib.request.Request('https://api.resend.com/emails',data=json.dumps(payload,ensure_ascii=False).encode('utf-8'),
-     headers={'Authorization':'Bearer '+key,'Content-Type':'application/json','Accept':'application/json'},method='POST')
+     headers={'Authorization':'Bearer '+key,'Content-Type':'application/json','Accept':'application/json',
+              'User-Agent':'EHKAM-HR-Portal/1.0'},method='POST')
  try:
   with urllib.request.urlopen(req,timeout=20) as response:
    result=json.load(response)
