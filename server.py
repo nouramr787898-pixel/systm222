@@ -51,7 +51,7 @@ def init():
   if col not in columns:c.execute('ALTER TABLE employees ADD COLUMN '+col+' TEXT DEFAULT NULL')
  c.execute('''CREATE TABLE IF NOT EXISTS password_resets(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL, code_hash TEXT NOT NULL,expires_at INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,used INTEGER NOT NULL DEFAULT 0)''')
  reset_columns={row[1] for row in c.execute('PRAGMA table_info(password_resets)')}
- for col in ('channel','destination'):
+ for col in ('channel','destination','verified_token_hash'):
   if col not in reset_columns:c.execute('ALTER TABLE password_resets ADD COLUMN '+col+' TEXT DEFAULT NULL')
  c.commit();c.close()
 
@@ -250,23 +250,40 @@ class Handler(BaseHTTPRequestHandler):
       (u['id'],reset_hash or 'bird-managed',current+600,channel,destination))
     c.commit()
     return self.write(generic)
-   if method=='POST' and path=='/api/password/confirm':
-    d=self.input();username=str(d.get('username','')).strip();code=str(d.get('code','')).strip();password=str(d.get('new_password',''))
-    if not re.fullmatch(r'\d{6}',code) or len(password)<10 or len(password)>128:fail('الرمز 6 أرقام وكلمة المرور الجديدة 10 أحرف على الأقل')
+   if method=='POST' and path=='/api/password/verify':
+    d=self.input();username=str(d.get('username','')).strip();code=str(d.get('code','')).strip()
+    if not re.fullmatch(r'\d{6}',code):fail('رمز التحقق غير صحيح',400)
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
-    if not u:fail('الرمز غير صحيح أو منتهي',400)
+    if not u:fail('رمز التحقق غير صحيح أو منتهي',400)
     r=c.execute('SELECT * FROM password_resets WHERE user_id=? AND used=0 ORDER BY id DESC LIMIT 1',(u['id'],)).fetchone()
-    if not r or r['expires_at']<int(time.time()) or r['attempts']>=5:fail('الرمز غير صحيح أو منتهي')
-    if not r['channel'] or not r['destination']:fail('الرمز غير صحيح أو منتهي')
+    if not r or r['expires_at']<int(time.time()) or r['attempts']>=5 or not r['channel'] or not r['destination']:
+     fail('رمز التحقق غير صحيح أو منتهي',400)
+    # Burn an attempt BEFORE contacting the verification provider, even on provider failure.
     c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],));c.commit()
     try:valid=bird_check_reset(r['channel'],r['destination'],code,r['code_hash'])
     except Exception:valid=False
-    if not valid:fail('الرمز غير صحيح أو منتهي')
+    if not valid:fail('رمز التحقق غير صحيح أو منتهي',400)
+    grant=secrets.token_urlsafe(48)
+    c.execute('UPDATE password_resets SET verified_token_hash=? WHERE id=?',(hashlib.sha256(grant.encode()).hexdigest(),r['id']))
+    c.commit()
+    return self.write({'ok':True,'reset_token':grant})
+   if method=='POST' and path=='/api/password/confirm':
+    d=self.input();username=str(d.get('username','')).strip();password=str(d.get('new_password',''))
+    grant=str(d.get('reset_token',''))
+    if len(password)<10 or len(password)>128:fail('كلمة المرور الجديدة 10 أحرف على الأقل',400)
+    if len(grant)<40 or len(grant)>200:fail('يجب التحقق من الرمز أولًا',403)
+    u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
+    if not u:fail('التحقق غير صالح أو منتهي',403)
+    r=c.execute('SELECT * FROM password_resets WHERE user_id=? AND used=0 ORDER BY id DESC LIMIT 1',(u['id'],)).fetchone()
+    if not r or r['expires_at']<int(time.time()) or not r['verified_token_hash'] or not hmac.compare_digest(r['verified_token_hash'],hashlib.sha256(grant.encode()).hexdigest()):
+     fail('التحقق غير صالح أو منتهي',403)
+    # Atomic one-time redemption; can't reuse token to change the password again.
+    changed=c.execute('UPDATE password_resets SET used=1,verified_token_hash=NULL WHERE id=? AND used=0 AND verified_token_hash=?',(r['id'],r['verified_token_hash']))
+    if changed.rowcount!=1:fail('تم استخدام رمز التحقق بالفعل',403)
     c.execute('UPDATE users SET password_hash=? WHERE id=?',(hashpw(password),u['id']))
     with LOCK:
      for token,uid in list(SESSIONS.items()):
       if uid==u['id']:SESSIONS.pop(token,None)
-    c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
     record(c,u,'password_reset','user',u['id']);c.commit();return self.write({'ok':True})
    u=self.actor(c)
    if path=='/api/me' and method=='GET':return self.write(dict(u))
