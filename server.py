@@ -59,11 +59,27 @@ class AuthevoServiceError(Exception):
  def __init__(self,code,status=None):
   self.code=code;self.status=status
 
+# Only log machine-readable error identifiers, never response messages or PII.
+def authevo_error_code(body):
+ if not isinstance(body,dict):return 'HTTP_ERROR'
+ candidates=[body.get('code'),body.get('error_code')]
+ error=body.get('error')
+ if isinstance(error,dict):
+  candidates.extend((error.get('code'),error.get('error_code'),error.get('type')))
+ elif isinstance(error,str):
+  candidates.append(error)
+ for value in candidates:
+  if not isinstance(value,str):continue
+  value=value.strip()
+  # Do not accidentally print arbitrary error messages, phones, keys or IDs.
+  if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{2,63}',value):return value.upper()
+ return 'HTTP_ERROR'
+
 def authevo_api(endpoint,payload):
- """Server-only Authevo access. Never expose the secret or verification code."""
+ """Server-side only; never log the key, phone number, OTP or raw provider response."""
  key=os.environ.get('AUTHEVO_API_KEY','').strip()
  if not key.startswith('sk_'):
-  print('AUTHEVO send/verify ERROR: NOT_CONFIGURED',flush=True)
+  print('AUTHEVO API ERROR code=NOT_CONFIGURED',flush=True)
   raise AuthevoServiceError('NOT_CONFIGURED')
  req=urllib.request.Request('https://api.authevo.dev'+endpoint,json.dumps(payload).encode(),method='POST',headers={
   'Authorization':'Bearer '+key,'Content-Type':'application/json','Accept':'application/json'})
@@ -75,11 +91,10 @@ def authevo_api(endpoint,payload):
  except urllib.error.HTTPError as error:
   try:
    body=json.loads(error.read(8192).decode('utf-8'))
-   rawcode=(body.get('error') or {}).get('code','HTTP_ERROR') if isinstance(body,dict) else 'HTTP_ERROR'
-  except (ValueError,UnicodeDecodeError,AttributeError):rawcode='HTTP_ERROR'
-  error_code=re.sub(r'[^A-Z0-9_]', '',str(rawcode).upper())[:64] or 'HTTP_ERROR'
-  print(f'AUTHEVO API ERROR endpoint={endpoint} status={error.code} code={error_code}',flush=True)
-  raise AuthevoServiceError(error_code,error.code) from None
+  except (ValueError,UnicodeDecodeError):body={}
+  code=authevo_error_code(body)
+  print(f'AUTHEVO API ERROR endpoint={endpoint} status={error.code} code={code}',flush=True)
+  raise AuthevoServiceError(code,error.code) from None
  except (urllib.error.URLError,TimeoutError) as error:
   print(f'AUTHEVO API NETWORK ERROR endpoint={endpoint} category={type(error).__name__}',flush=True)
   raise AuthevoServiceError('NETWORK_ERROR') from None
