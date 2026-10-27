@@ -78,7 +78,34 @@ def resend_send_reset(destination,code):
    result=json.load(response)
    return bool(isinstance(result,dict) and result.get('id'))
  except urllib.error.HTTPError as error:
-  print('RESEND SEND ERROR http_status='+str(error.code),flush=True)
+  # Never print raw response text: it may contain addresses or identifiers.
+  content_type=error.headers.get('Content-Type','').split(';',1)[0].strip().lower()
+  server=error.headers.get('Server','unknown').lower()
+  server_type=('cloudflare' if 'cloudflare' in server else
+               'proxy' if any(x in server for x in ('nginx','envoy','traefik')) else
+               'other')
+  provider_code='unavailable'
+  response_shape='non_json'
+  try:
+   raw=error.read(4096)
+   if content_type=='application/json' or raw.lstrip().startswith(b'{'):
+    body=json.loads(raw.decode('utf-8','replace'))
+    if isinstance(body,dict):
+     response_shape='json_object'
+     obj=body.get('error')
+     if isinstance(obj,dict):
+      val=obj.get('name') or obj.get('code') or obj.get('type')
+     else:
+      val=body.get('name') or body.get('code') or body.get('type')
+     if isinstance(val,str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_\-]{1,63}',val):
+      provider_code=val
+    else:response_shape='json_other'
+  except (ValueError,UnicodeError):
+   response_shape='invalid_json'
+  print('RESEND DIAGNOSTIC http_status='+str(error.code)+
+        ' content_type='+str(content_type or 'unknown')+
+        ' server_type='+server_type+' shape='+response_shape+
+        ' error_code='+provider_code,flush=True)
   return False
  except (urllib.error.URLError,TimeoutError,ValueError):
   print('RESEND SEND ERROR connection_or_response',flush=True)
