@@ -51,8 +51,10 @@ def init():
   if col not in columns:c.execute('ALTER TABLE employees ADD COLUMN '+col+' TEXT DEFAULT NULL')
  c.execute('''CREATE TABLE IF NOT EXISTS password_resets(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL, code_hash TEXT NOT NULL,expires_at INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,used INTEGER NOT NULL DEFAULT 0)''')
  reset_columns={row[1] for row in c.execute('PRAGMA table_info(password_resets)')}
- for col in ('channel','destination','verified_token_hash'):
+ for col in ('channel','destination','verified_token_hash','whatsapp_phone'):
   if col not in reset_columns:c.execute('ALTER TABLE password_resets ADD COLUMN '+col+' TEXT DEFAULT NULL')
+ for col in ('email_verified','whatsapp_attempts','whatsapp_sent'):
+  if col not in {row[1] for row in c.execute('PRAGMA table_info(password_resets)')}:c.execute('ALTER TABLE password_resets ADD COLUMN '+col+' INTEGER NOT NULL DEFAULT 0')
  c.commit();c.close()
 
 class AuthevoServiceError(Exception):
@@ -111,6 +113,32 @@ def resend_send_reset(destination,code):
  except (urllib.error.URLError,TimeoutError,ValueError):
   print('RESEND SEND ERROR connection_or_response',flush=True)
   return False
+
+def authevo_request(endpoint,payload):
+ """Authevo WhatsApp OTP verified server-side; never log keys, codes or phone numbers."""
+ key=os.environ.get('AUTHEVO_API_KEY','').strip()
+ if not key.startswith('sk_'):raise RuntimeError('AUTHEVO_NOT_CONFIGURED')
+ req=urllib.request.Request('https://api.authevo.dev'+endpoint,
+  data=json.dumps(payload).encode('utf-8'),method='POST',
+  headers={'Authorization':'Bearer '+key,'Content-Type':'application/json',
+           'Accept':'application/json','User-Agent':'EHKAM-HR-Portal/1.0'})
+ try:
+  with urllib.request.urlopen(req,timeout=20) as resp:return json.load(resp)
+ except urllib.error.HTTPError as error:
+  print('AUTHEVO REQUEST FAILED status='+str(error.code),flush=True)
+  raise RuntimeError('AUTHEVO_SEND_OR_VERIFY_FAILED')
+ except (urllib.error.URLError,TimeoutError,ValueError):
+  print('AUTHEVO REQUEST FAILED network_or_response',flush=True)
+  raise RuntimeError('AUTHEVO_SEND_OR_VERIFY_FAILED')
+
+def authevo_send(phone):
+ result=authevo_request('/v1/otp/send',{'phone':phone,'language':'ar'})
+ data=result.get('data') or {}
+ return data.get('status')=='sent' and bool(data.get('message_id'))
+
+def authevo_verify(phone,code):
+ result=authevo_request('/v1/otp/verify',{'phone':phone,'code':code})
+ return (result.get('data') or {}).get('verified') is True
 
 def clean_contacts(d):
  country=str(d.get('phone_country') or '+966');local=re.sub(r'[^0-9]','',str(d.get('phone_local') or ''))
@@ -235,39 +263,72 @@ class Handler(BaseHTTPRequestHandler):
     record(c,u,'login','user',u['id']);c.commit()
     return self.write({'ok':True},headers={'Set-Cookie':'ehkam_session='+token+'; HttpOnly; SameSite=Strict; Path=/'})
    if method=='POST' and path=='/api/password/request':
-    d=self.input();username=str(d.get('username','')).strip();channel=d.get('channel');ip=self.client_address[0]
-    if channel!='email' or not username:fail('استعادة كلمة المرور متاحة عبر البريد الإلكتروني فقط')
+    d=self.input();username=str(d.get('username','')).strip();ip=self.client_address[0]
+    if not username:fail('اسم المستخدم مطلوب')
     current=int(time.time());key=(ip,username)
     with LOCK:
      timestamps=[t for t in RESET_ATTEMPTS.get(key,[]) if current-t<3600]
      if len(timestamps)>=5:fail('محاولات كثيرة؛ حاول لاحقًا',429)
      timestamps.append(current);RESET_ATTEMPTS[key]=timestamps
-    generic={'message':'إذا كان الحساب موجودًا وله بريد مسجّل، سيصلك رمز الاستعادة.'}
+    generic={'message':'إذا كان الحساب موجودًا ومسجّلًا ببريد ورقم واتساب، سيصلك رمز البريد.'}
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
     if not u:return self.write(generic)
-    e=c.execute('SELECT email FROM employees WHERE id=?',(u['employee_id'],)).fetchone()
-    destination=str(e['email'] or '').strip().lower() if e else ''
-    if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',destination):return self.write(generic)
+    e=c.execute('SELECT email,phone_country,phone_local FROM employees WHERE id=?',(u['employee_id'],)).fetchone()
+    if not e:return self.write(generic)
+    destination=str(e['email'] or '').strip().lower()
+    country=str(e['phone_country'] or '')
+    local=re.sub(r'[^0-9]','',str(e['phone_local'] or ''))
+    if local.startswith('0'):local=local[1:]
+    phone=country+local
+    if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',destination) or country not in ('+966','+20') or not (8<=len(local)<=10):return self.write(generic)
     code=f'{secrets.randbelow(1000000):06d}'
-    sent=resend_send_reset(destination,code)
-    if not sent:fail('تعذر إرسال البريد حاليًا؛ راجع إعداد Resend أو سجلات Railway',503)
+    if not resend_send_reset(destination,code):fail('تعذر إرسال البريد حاليًا؛ راجع سجلات Railway',503)
     c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
-    c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at,channel,destination) VALUES(?,?,?,?,?)',
-      (u['id'],hashpw(code),current+600,'email',destination))
+    c.execute('INSERT INTO password_resets(user_id,code_hash,expires_at,channel,destination,whatsapp_phone) VALUES(?,?,?,?,?,?)',
+      (u['id'],hashpw(code),current+600,'dual',destination,phone))
     c.commit();return self.write(generic)
    if method=='POST' and path=='/api/password/verify':
-    d=self.input();username=str(d.get('username','')).strip();code=str(d.get('code','')).strip()
-    if not re.fullmatch(r'\d{6}',code):fail('رمز التحقق غير صحيح',400)
+    d=self.input();username=str(d.get('username','')).strip();code=str(d.get('code','')).strip();channel=d.get('channel')
+    if not re.fullmatch(r'\d{6}',code) or channel not in ('email','whatsapp'):fail('رمز التحقق غير صحيح',400)
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
     if not u:fail('رمز التحقق غير صحيح أو منتهي',400)
     r=c.execute('SELECT * FROM password_resets WHERE user_id=? AND used=0 ORDER BY id DESC LIMIT 1',(u['id'],)).fetchone()
-    if not r or r['expires_at']<int(time.time()) or r['attempts']>=5 or r['channel']!='email' or not r['code_hash']:
-     fail('رمز التحقق غير صحيح أو منتهي',400)
-    c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],));c.commit()
-    if not verifypw(code,r['code_hash']):fail('رمز التحقق غير صحيح أو منتهي',400)
+    if not r or r['expires_at']<int(time.time()) or r['channel']!='dual':fail('رمز التحقق غير صحيح أو منتهي',400)
+    if channel=='email':
+     if r['email_verified'] or r['attempts']>=5:fail('رمز البريد مستعمل أو تجاوز عدد المحاولات',400)
+     c.execute('UPDATE password_resets SET attempts=attempts+1 WHERE id=?',(r['id'],));c.commit()
+     if not verifypw(code,r['code_hash']):fail('رمز البريد غير صحيح أو منتهي',400)
+     c.execute('UPDATE password_resets SET email_verified=1 WHERE id=?',(r['id'],));c.commit()
+     try: sent=authevo_send(r['whatsapp_phone'])
+     except RuntimeError:sent=False
+     if sent:
+      c.execute('UPDATE password_resets SET whatsapp_sent=1 WHERE id=?',(r['id'],));c.commit()
+     return self.write({'ok':True,'next':'whatsapp','whatsapp_sent':bool(sent)})
+    if not r['email_verified'] or not r['whatsapp_sent'] or r['whatsapp_attempts']>=5:fail('يجب تأكيد البريد وإرسال رمز واتساب أولًا',403)
+    c.execute('UPDATE password_resets SET whatsapp_attempts=whatsapp_attempts+1 WHERE id=?',(r['id'],));c.commit()
+    try: verified=authevo_verify(r['whatsapp_phone'],code)
+    except RuntimeError:fail('تعذر التحقق من واتساب حاليًا',503)
+    if not verified:fail('رمز واتساب غير صحيح أو منتهي',400)
     grant=secrets.token_urlsafe(48)
     c.execute('UPDATE password_resets SET verified_token_hash=? WHERE id=?',(hashlib.sha256(grant.encode()).hexdigest(),r['id']))
     c.commit();return self.write({'ok':True,'reset_token':grant})
+   if method=='POST' and path=='/api/password/whatsapp/send':
+    d=self.input();username=str(d.get('username','')).strip();ip=self.client_address[0];current=int(time.time())
+    with LOCK:
+     key=(ip,username,'whatsapp')
+     attempts=[t for t in RESET_ATTEMPTS.get(key,[]) if current-t<3600]
+     if len(attempts)>=3:fail('محاولات إرسال كثيرة؛ حاول لاحقًا',429)
+     attempts.append(current);RESET_ATTEMPTS[key]=attempts
+    u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
+    if not u:fail('تعذر إرسال رمز واتساب',400)
+    r=c.execute('SELECT * FROM password_resets WHERE user_id=? AND used=0 ORDER BY id DESC LIMIT 1',(u['id'],)).fetchone()
+    if not r or r['channel']!='dual' or not r['email_verified'] or r['expires_at']<current or r['verified_token_hash']:
+     fail('يجب تأكيد البريد أولًا',403)
+    try:sent=authevo_send(r['whatsapp_phone'])
+    except RuntimeError:sent=False
+    if not sent:fail('تعذر إرسال رمز واتساب حاليًا',503)
+    c.execute('UPDATE password_resets SET whatsapp_sent=1 WHERE id=?',(r['id'],));c.commit()
+    return self.write({'ok':True})
    if method=='POST' and path=='/api/password/confirm':
     d=self.input();username=str(d.get('username','')).strip();password=str(d.get('new_password',''))
     grant=str(d.get('reset_token',''))
@@ -276,7 +337,7 @@ class Handler(BaseHTTPRequestHandler):
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
     if not u:fail('التحقق غير صالح أو منتهي',403)
     r=c.execute('SELECT * FROM password_resets WHERE user_id=? AND used=0 ORDER BY id DESC LIMIT 1',(u['id'],)).fetchone()
-    if not r or r['expires_at']<int(time.time()) or not r['verified_token_hash'] or not hmac.compare_digest(r['verified_token_hash'],hashlib.sha256(grant.encode()).hexdigest()):
+    if not r or r['channel']!='dual' or not r['email_verified'] or not r['whatsapp_sent'] or r['expires_at']<int(time.time()) or not r['verified_token_hash'] or not hmac.compare_digest(r['verified_token_hash'],hashlib.sha256(grant.encode()).hexdigest()):
      fail('التحقق غير صالح أو منتهي',403)
     # Atomic one-time redemption; can't reuse token to change the password again.
     changed=c.execute('UPDATE password_resets SET used=1,verified_token_hash=NULL WHERE id=? AND used=0 AND verified_token_hash=?',(r['id'],r['verified_token_hash']))
