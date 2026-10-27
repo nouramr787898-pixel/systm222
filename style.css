@@ -66,3 +66,6 @@
 .recovery-note{padding:13px 14px;border-radius:12px;background:#eef6f2;color:#275844;font-size:12px;line-height:1.9}
 .otp-channel-badge{display:inline-flex;align-items:center;justify-content:center;padding:8px 14px;border-radius:999px;background:#eef6f2;color:#0d6d4f;font-size:12px;font-weight:800;margin-bottom:12px}
 @media(max-width:560px){.channel-grid{grid-template-columns:1fr}.channel-card-body{min-height:auto}#modal:has(.recovery-picker){padding:18px 16px}}
+
+/* HR phase 2: salary payout and advance entitlement */
+.payment-status{display:inline-flex;align-items:center;padding:5px 12px;border-radius:99px;margin-bottom:10px;font-weight:700;font-size:12px}.payment-bank{color:#11744f;background:#e5f7ef}.payment-cash{color:#99631b;background:#fff1df}.advance-preview{grid-column:1/-1;padding:15px 17px;border-radius:14px;background:linear-gradient(130deg,#eaf6ef,#f9fbf8);border:1px solid #bfdccd;line-height:1.9;color:#204d3a}.advance-preview p{font-size:12px}.advance-preview strong{font-size:15px}.advance-preview b{color:#075f40}

@@ -437,6 +437,10 @@ class Handler(BaseHTTPRequestHandler):
     c.execute('UPDATE employees SET '+','.join(k+'=?' for k in changes)+' WHERE id=?',list(changes.values())+[eid]);record(c,u,'update','employee',eid,','.join(changes));c.commit();return self.write({'ok':True})
    if path.startswith('/api/leave/') and method=='GET':
     eid=int(path.rsplit('/',1)[1]);e=user_allowed_emp(c,u,eid);return self.write(leave(c,e))
+   if path=='/api/advance/preview' and method=='GET':
+    qs=parse_qs(urlparse(self.path).query);eid=int(qs.get('employee_id',[u['employee_id'] or 0])[0]);e=user_allowed_emp(c,u,eid)
+    months=remaining_months(e['contract_end'],TODAY());gross=salary(e);monthly_limit=round(gross*.35,2)
+    return self.write({'gross_salary':gross,'remaining_months':months,'max_monthly_installment':monthly_limit,'max_advance':round(monthly_limit*months,2),'contract_end':e['contract_end']})
    if path=='/api/requests' and method=='GET':return self.write(visible_requests(c,u))
    if path=='/api/requests' and method=='POST':
     d=self.input();eid=int(d.get('employee_id',u['employee_id'] or 0));e=user_allowed_emp(c,u,eid)
@@ -472,13 +476,14 @@ class Handler(BaseHTTPRequestHandler):
      if u['role']=='manager' and e['manager_id']!=u['employee_id']:fail('ليس من موظفيك',403)
      if r['type']=='delegation':fail('الانتداب ينتظر قبول أو رفض الموظف')
     if action in ('accepted','declined'):
-     if r['type']!='delegation' or u['employee_id']!=r['employee_id']:fail('فقط الموظف المعني ينتدبه المدير',403)
+     if r['type']!='delegation' or u['role']!='employee' or u['employee_id']!=r['employee_id']:fail('فقط الموظف المعني ينتدبه المدير',403)
+     if action=='declined' and not str(d.get('note','')).strip():fail('اذكر سبب رفض الانتداب',400)
     if action=='cancelled' and u['role']!='admin':fail('إلغاء الطلب المعتمد متاح للإدارة فقط في النموذج الأولي',403)
     if action=='approved' and r['type']=='annual_leave':
      if r['days']>leave(c,e)['available']:fail('الرصيد غير كافٍ عند الاعتماد')
     c.execute('UPDATE requests SET status=?,decision_note=?,updated_at=? WHERE id=?',(action,d.get('note',''),now(),rid))
     if action=='approved' and r['type']=='punch_fix' and r['start_date']:
-     c.execute('''INSERT INTO attendance(employee_id,day,check_in,check_out,source) VALUES(?,?,?,?,?) ON CONFLICT(employee_id,day) DO UPDATE SET check_in=excluded.check_in,check_out=excluded.check_out,source=excluded.source''',(e['id'],r['start_date'],e['work_start'],e['work_end'],'approved_punch_fix'))
+     c.execute('''INSERT INTO attendance(employee_id,day,check_in,check_out,source) VALUES(?,?,?,?,?) ON CONFLICT(employee_id,day) DO UPDATE SET check_in=COALESCE(attendance.check_in,excluded.check_in),check_out=COALESCE(attendance.check_out,excluded.check_out),source=excluded.source''',(e['id'],r['start_date'],e['work_start'],e['work_end'],'approved_punch_fix'))
     record(c,u,'status_'+action,'request',rid,d.get('note',''));c.commit();return self.write({'ok':True})
    if path=='/api/attendance' and method=='GET':
     qs=parse_qs(urlparse(self.path).query);eid=int(qs.get('employee_id',[u['employee_id'] or 0])[0]);user_allowed_emp(c,u,eid)
@@ -490,6 +495,10 @@ class Handler(BaseHTTPRequestHandler):
     if u['role']!='employee':fail('تسجيل البصمة من حساب الموظف فقط',403)
     # IMPORTANT no trusted geolocation validation in this prototype. Restrict endpoint rather than imply location check.
     fail('تسجيل البصمة الجغرافية مغلق حتى تفعيل تحقق الموقع من الخادم',501)
+   if path=='/api/archive/history' and method=='GET':
+    if u['role']!='admin':fail('غير مصرح',403)
+    rows=c.execute("SELECT username,action,entity,entity_id,timestamp FROM audit WHERE action IN ('archive','restore') ORDER BY id DESC LIMIT 100").fetchall()
+    return self.write([dict(row) for row in rows])
    if path=='/api/archive' and method=='POST':
     if u['role']!='admin':fail('غير مصرح',403)
     d=self.input();target=d.get('target');eid=int(d.get('id',0));value=int(bool(d.get('archived')))
