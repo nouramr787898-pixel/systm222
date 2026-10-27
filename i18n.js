@@ -1,5 +1,17 @@
 // Interface translations. Business data stays in its original language.
 Object.assign(uiEnglish, {
+  "أضف شركة أولًا قبل إضافة موظف": "Add a company before adding an employee",
+  "أضف شركة أولًا لإعداد سياسات العمل": "Add a company to configure work policies",
+  "قاعدة البيانات": "Database",
+  "مسح بيانات الشركات والموظفين": "Clear company and employee data",
+  "أعداد السجلات المحذوفة": "Deleted record counts",
+  "ملف النسخة الاحتياطية": "Backup file",
+  "موظفو الشركة": "Company employees",
+  "موظفو هذه الشركة فقط": "Employees of this company only",
+  "العودة إلى الشركات": "Back to companies",
+  "فتح القائمة": "Open menu",
+  "إغلاق القائمة": "Close menu",
+  "حد السلفة وفترة الإشعار وفق سياسة الشركة.": "Advance limit and notice period follow company policy.",
   "عنوان GPS": "GPS address",
   "أرشفة": "Archive",
   "استرجاع": "Restore",
