@@ -13,3 +13,5 @@ __pycache__/
 *.key
 *.p12
 .railway/
+production-init/
+production-backups/

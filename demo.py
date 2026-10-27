@@ -50,7 +50,7 @@ def prepare_demo(directory):
         return database
     # The path above is fixed to demo.sqlite3 in a separate directory.
     server.DB = database
-    server.init(seeder=seed_fixture)
+    server.init(seeder=seed_fixture,allow_create=True)
     today = datetime.date.today()
     start = today.replace(year=today.year - 1, day=1)
     end = today.replace(year=today.year + 2, day=1)
