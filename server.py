@@ -25,20 +25,44 @@ def verifypw(password,stored):
   s,_=stored.split(':');return hmac.compare_digest(hashpw(password,s),stored)
  except Exception:return False
 
-def conn():
- c=sqlite3.connect(DB,timeout=15)
+def persistent_database_required():
+ return bool(os.environ.get('RAILWAY_ENVIRONMENT_ID') or os.environ.get('RAILWAY_SERVICE_ID') or os.environ.get('RAILWAY_PROJECT_ID') or os.environ.get('EHKAM_REQUIRE_EXISTING_DB')=='1' or os.environ.get('EHKAM_DB_ID'))
+
+def conn(allow_create=False):
+ if persistent_database_required() and not allow_create:
+  c=sqlite3.connect(DB.resolve().as_uri()+'?mode=rw',uri=True,timeout=15)
+  expected=os.environ.get('EHKAM_DB_ID','').strip()
+  if expected:
+   try:
+    row=c.execute('SELECT database_id FROM production_identity WHERE id=1').fetchone()
+    if not row or row[0]!=expected:raise RuntimeError('Production database identity mismatch')
+   except Exception:
+    c.close();raise
+ else:c=sqlite3.connect(DB,timeout=15)
  c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');return c
 
 def validate_runtime_database():
- required=bool(os.environ.get('RAILWAY_ENVIRONMENT_ID') or os.environ.get('RAILWAY_SERVICE_ID') or os.environ.get('RAILWAY_PROJECT_ID') or os.environ.get('EHKAM_REQUIRE_EXISTING_DB')=='1')
+ required=persistent_database_required()
  if not required:return
  if not DB.is_file():raise RuntimeError('Existing database not found. Deployment stopped; configure EHKAM_DB_PATH to the existing persistent database. No database was created.')
  with sqlite3.connect(DB.resolve().as_uri()+'?mode=ro',uri=True) as existing:
   if existing.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise RuntimeError('Existing database integrity check failed; inspect a backup before migration.')
+  expected=os.environ.get('EHKAM_DB_ID','').strip()
+  railway=bool(os.environ.get('RAILWAY_ENVIRONMENT_ID') or os.environ.get('RAILWAY_SERVICE_ID') or os.environ.get('RAILWAY_PROJECT_ID'))
+  mount=os.environ.get('RAILWAY_VOLUME_MOUNT_PATH','')
+  if expected and railway:
+   if not mount:raise RuntimeError('Railway persistent volume is not reported; startup stopped.')
+   if not DB.resolve().is_relative_to(Path(mount).resolve()):raise RuntimeError('Production database must be inside the mounted Railway volume; startup stopped.')
+  marked=existing.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_identity'").fetchone()
+  if expected or marked:
+   if not expected:raise RuntimeError('EHKAM_DB_ID must be configured for this production database; startup stopped.')
+   if not marked:raise RuntimeError('Configured production database identity is absent; startup stopped.')
+   identity=existing.execute('SELECT database_id FROM production_identity WHERE id=1').fetchone()
+   if not identity or identity[0]!=expected:raise RuntimeError('Production database identity mismatch; startup stopped without initialization.')
   if not existing.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").fetchone() or not existing.execute('SELECT 1 FROM users LIMIT 1').fetchone():
    raise RuntimeError('Existing account database required. Deployment stopped without creating demo users.')
 
-def init(seeder=None):
+def init(seeder=None,allow_create=False):
  # SQLite backup API preserves a consistent pre-migration copy, including WAL data.
  if DB.exists():
   with conn() as existing:
@@ -57,7 +81,7 @@ def init(seeder=None):
     backup=DB.with_name(DB.name+'.before-hr-v2.bak')
     if backup.exists():raise RuntimeError('HR migration backup already exists; inspect before retrying')
     with sqlite3.connect(backup) as target:existing.backup(target)
- c=conn();c.executescript('''
+ c=conn(allow_create=allow_create);c.executescript('''
  CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL, name_en TEXT DEFAULT '',contract_end TEXT,city TEXT DEFAULT '', address TEXT DEFAULT '', latitude REAL, longitude REAL, geofence_radius REAL NOT NULL DEFAULT 100, archived INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','manager','employee')),employee_id INTEGER,company_id INTEGER);
  CREATE TABLE IF NOT EXISTS employees(id INTEGER PRIMARY KEY,company_id INTEGER NOT NULL REFERENCES companies(id),name TEXT NOT NULL,name_en TEXT DEFAULT '',employee_no TEXT NOT NULL, identity_no TEXT DEFAULT '',job TEXT DEFAULT '',department TEXT DEFAULT '',manager_id INTEGER, status TEXT NOT NULL DEFAULT 'نشط',hire_date TEXT, contract_start TEXT,contract_end TEXT,basic REAL NOT NULL DEFAULT 0,housing REAL NOT NULL DEFAULT 0,transport REAL NOT NULL DEFAULT 0,other REAL NOT NULL DEFAULT 0,annual_entitlement REAL NOT NULL DEFAULT 21,carryover REAL NOT NULL DEFAULT 0,monthly_grant REAL NOT NULL DEFAULT 0,workweek TEXT NOT NULL DEFAULT '0,1,2,3,5,6', work_start TEXT NOT NULL DEFAULT '09:00',work_end TEXT NOT NULL DEFAULT '17:00',payment_method TEXT NOT NULL DEFAULT 'bank',archived INTEGER NOT NULL DEFAULT 0,UNIQUE(company_id,employee_no));
@@ -384,6 +408,10 @@ class Handler(BaseHTTPRequestHandler):
     try:
      ready=health.execute("SELECT 1 FROM schema_migrations WHERE version='hr-v2'").fetchone()
      health.execute('SELECT 1 FROM users LIMIT 1').fetchone()
+     expected=os.environ.get('EHKAM_DB_ID','').strip()
+     if expected:
+      identity=health.execute('SELECT database_id FROM production_identity WHERE id=1').fetchone()
+      if not identity or identity[0]!=expected:raise RuntimeError('database_identity_mismatch')
     finally:health.close()
     if not ready:raise RuntimeError('schema_not_ready')
     revision=os.environ.get('RAILWAY_GIT_COMMIT_SHA','')
