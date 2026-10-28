@@ -139,3 +139,5 @@
 .attachment-image[hidden],.attachment-viewer>img[hidden]{display:none}
 
 .attachment-viewer-head{position:sticky;top:0;background:#fff;padding-bottom:8px;z-index:1}.attachment-viewer.is-actual-size>img{max-width:none;max-height:none}.attachment-viewer-head>strong{flex:1}@media(max-width:480px){.attachment-viewer-head{flex-wrap:wrap}.attachment-viewer-head>strong{flex-basis:100%}}
+
+.chat-brand,.chat-brand>div{min-width:0}.chat-brand strong{overflow-wrap:anywhere}.chat-reset{flex-shrink:0}
