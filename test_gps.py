@@ -9,10 +9,10 @@ import test_workflow as fixture
 class MapsTests(unittest.TestCase):
     def test_coordinate_formats_and_pin_priority(self):
         cases={
-            'https://www.google.com/maps?q=30.1390381,31.2558794':(30.1390381,31.2558794),
+            'https://www.google.com/maps?q=24.7136,46.6753':(24.7136,46.6753),
             'https://www.google.com/maps/search/?api=1&query=30.1%2C31.2':(30.1,31.2),
             'https://www.google.com/maps/@30.1,31.2,18z':(30.1,31.2),
-            'https://www.google.com/maps/place/office/@30,31,15z/data=!3d30.1390381!4d31.2558794':(30.1390381,31.2558794),
+            'https://www.google.com/maps/place/office/@30,31,15z/data=!3d24.7136!4d46.6753':(24.7136,46.6753),
         }
         with patch('gps_location.urllib.request.build_opener',side_effect=AssertionError('No network needed')):
             for value,point in cases.items():self.assertEqual(gps.resolve(value),point)
@@ -23,10 +23,10 @@ class MapsTests(unittest.TestCase):
 
     def test_short_url_resolution(self):
         response=MagicMock();response.__enter__.return_value=response
-        response.geturl.return_value='https://www.google.com/maps?q=30.1390381,31.2558794'
+        response.geturl.return_value='https://www.google.com/maps?q=24.7136,46.6753'
         with patch('gps_location.urllib.request.build_opener') as factory:
             factory.return_value.open.return_value=response
-            self.assertEqual(gps.resolve('https://maps.app.goo.gl/example?g_st=ic'),(30.1390381,31.2558794))
+            self.assertEqual(gps.resolve('https://maps.app.goo.gl/example?g_st=ic'),(24.7136,46.6753))
 
     def test_redirect_cannot_fetch_arbitrary_host(self):
         request=urllib.request.Request('https://maps.app.goo.gl/example')
@@ -50,26 +50,27 @@ class CompanyGPSTests(unittest.TestCase):
     client=fixture.WorkflowTests.client
 
     def test_create_and_idempotent_schema(self):
-        link='https://www.google.com/maps?q=30.1390381,31.2558794'
+        link='https://www.google.com/maps?q=24.7136,46.6753'
         code,out=self.admin('companies',{'name':'شركة GPS','gps_url':link})
         self.assertEqual(code,201,out)
         server.init()
         with server.conn() as c:
             row=c.execute("SELECT * FROM companies WHERE name='شركة GPS'").fetchone()
-            self.assertEqual((row['gps_url'],row['latitude'],row['longitude']),(link,30.1390381,31.2558794))
+            self.assertEqual((row['gps_url'],row['latitude'],row['longitude']),(link,24.7136,46.6753))
             self.assertEqual(c.execute('SELECT count(*) FROM employees').fetchone()[0],3)
 
     def test_edit_preserves_legacy_location_and_uses_new_pin(self):
         self.assertEqual(self.admin('companies/1',{'name':'الشركة المعدلة','gps_url':''})[0],200)
-        with server.conn() as c:self.assertEqual(c.execute('SELECT latitude FROM companies WHERE id=1').fetchone()[0],30.1390381)
+        with server.conn() as c:self.assertEqual(c.execute('SELECT latitude FROM companies WHERE id=1').fetchone()[0],24.7136)
         self.assertEqual(self.admin('companies/1',{'name':'موقع جديد','gps_url':'https://google.com/maps?q=20,20'})[0],200)
-        self.assertEqual(self.employee('attendance',{'latitude':30.1390381,'longitude':31.2558794,'accuracy':10})[0],400)
+        self.assertEqual(self.employee('attendance',{'latitude':24.7136,'longitude':46.6753,'accuracy':10})[0],400)
         self.assertEqual(self.employee('attendance',{'latitude':20,'longitude':20,'accuracy':10})[0],200)
+        with server.conn() as c:c.execute("UPDATE attendance SET check_in_at=?",((server.datetime.datetime.now(server.datetime.timezone.utc)-server.datetime.timedelta(minutes=2)).isoformat(),))
         self.assertEqual(self.employee('attendance',{'latitude':20,'longitude':20,'accuracy':10})[0],200)
 
     def test_reject_bad_link_without_changing_location(self):
         self.assertEqual(self.admin('companies/1',{'name':'bad','gps_url':'https://evil.test/'})[0],400)
-        with server.conn() as c:self.assertEqual(c.execute('SELECT latitude FROM companies WHERE id=1').fetchone()[0],30.1390381)
+        with server.conn() as c:self.assertEqual(c.execute('SELECT latitude FROM companies WHERE id=1').fetchone()[0],24.7136)
 
     def test_gps_changes_are_admin_only(self):
         self.assertEqual(self.employee('companies/1',{'name':'x','gps_url':'https://google.com/maps?q=20,20'})[0],403)

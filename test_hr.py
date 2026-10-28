@@ -109,7 +109,7 @@ class HRTests(unittest.TestCase):
         code,sites=self.admin('sites?company_id=1',{'name':'موقع آخر','latitude':20,'longitude':20,'radius':100})
         self.assertEqual(code,200,sites)
         self.assertEqual(self.admin('employees/2',{'site_id':sites[0]['id']})[0],200)
-        self.assertEqual(self.employee('attendance',{'latitude':30.1390381,'longitude':31.2558794,'accuracy':10})[0],400)
+        self.assertEqual(self.employee('attendance',{'latitude':24.7136,'longitude':46.6753,'accuracy':10})[0],400)
         self.assertEqual(self.employee('attendance',{'latitude':20,'longitude':20,'accuracy':10})[0],200)
         with server.conn() as c:c.execute("INSERT INTO companies(id,name) VALUES(2,'أخرى')")
         site=self.admin('sites?company_id=2',{'name':'أخرى','latitude':30,'longitude':30,'radius':100})[1][0]
@@ -258,11 +258,11 @@ class HRTests(unittest.TestCase):
         import urllib.request
         with urllib.request.urlopen(self.base+'health') as response:result=json.load(response)
         self.assertEqual(result['status'],'ok')
-        self.assertEqual(result['release'],'hr-reviewed-v2')
+        self.assertEqual(result['release'],'professional-v1')
         self.assertEqual(set(result),{'status','release','database','commit'})
 
     def test_otp_email_or_phone_with_mocked_providers(self):
-        self.assertEqual(self.admin('employees/2',{'email':'demo@example.test','phone_country':'+20','phone_local':'1012345678'})[0],200)
+        self.assertEqual(self.admin('employees/2',{'email':'demo@example.test','phone_country':'+966','phone_local':'501234567'})[0],200)
         captured=[]
         with patch.object(server,'resend_send_reset',side_effect=lambda dest,code:captured.append(code) or True):
             self.assertEqual(self.employee('password/request',{'username':'employee','channel':'email'})[0],200)

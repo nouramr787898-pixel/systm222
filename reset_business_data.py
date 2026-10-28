@@ -18,12 +18,15 @@ import production_db
 import server
 
 CLEAR_TABLES=(
+    'approval_delegations','company_policy_terms','import_previews','candidates','vacancies','appraisals','training_records',
+    'loan_repayments','payroll_events','payroll_lines','payroll_runs','loans','pay_adjustments',
+    'employee_terms','lifecycle_tasks','employee_assets','auth_sessions','login_limits',
     'request_attachments','request_decisions','request_comments','employee_files',
     'email_outbox','notifications','settlements','absences','overtime_reviews',
     'attendance','password_resets','employee_number_history','requests','contracts',
     'schedules','work_sites','holidays','employees','companies','audit',
 )
-KEEP_TABLES={'users','employee_number_sequence','schema_migrations','production_identity'}
+KEEP_TABLES={'users','employee_number_sequence','schema_migrations','production_identity','admin_profiles','user_mfa'}
 
 
 def guard(database,expected_id):
@@ -48,11 +51,13 @@ def reset_data(database,expected_id,username,password,confirmation,backup):
             if not admin or not server.verifypw(password,admin['password_hash']):raise ValueError('Administrator credentials are invalid')
             tables={r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
             if tables-set(CLEAR_TABLES)-KEEP_TABLES:raise ValueError('Unknown tables found; review reset scope first')
+            if c.execute('SELECT 1 FROM admin_profiles WHERE company_id IS NOT NULL LIMIT 1').fetchone():raise ValueError('Scoped administrators exist; review account preservation before any business reset')
             original_identity=c.execute('SELECT database_id FROM production_identity WHERE id=1').fetchone()[0]
             if original_identity!=expected_id:raise ValueError('Database identity changed')
             before={name:c.execute('SELECT COUNT(*) FROM '+name).fetchone()[0] for name in CLEAR_TABLES if name in tables}
             # This verified snapshot is made before DELETE while competing writers are blocked.
             production_db.copy_database(database,backup,expected_id)
+            c.execute("DELETE FROM user_mfa WHERE user_id IN (SELECT id FROM users WHERE role!='admin')")
             for table in CLEAR_TABLES:
                 if table in tables:c.execute('DELETE FROM '+table)
             c.execute("DELETE FROM users WHERE role!='admin'")

@@ -95,7 +95,7 @@ class ProductionDatabaseTests(unittest.TestCase):
 
     def test_restart_new_code_directory_and_restore_drill(self):
         code_a=self.root/'release-a';code_b=self.root/'release-b'
-        runtime_files=['railway_start.py','server.py','hr.py','gps_location.py','i18n.js','app.js','hr-ui.js','style.css','index.html','ehkam-logo-full.png']
+        runtime_files=['railway_start.py','server.py','permissions.py','directory_tools.py','talent.py','security.py','workforce.py','payroll.py','professional-ui.js','hr.py','gps_location.py','i18n.js','app.js','hr-ui.js','style.css','index.html','ehkam-logo-full.png']
         for directory in (code_a,code_b):
             directory.mkdir()
             for filename in runtime_files:shutil.copyfile(Path(server.__file__).parent/filename,directory/filename)
@@ -112,7 +112,10 @@ class ProductionDatabaseTests(unittest.TestCase):
                 except urllib.error.URLError:time.sleep(.05)
             process.terminate();process.wait(timeout=5);raise AssertionError('Test server did not start')
         def client(base):
-            opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+            class LoopbackTLSFixturePolicy(http.cookiejar.DefaultCookiePolicy):
+                def return_ok_secure(self,cookie,request):
+                    return request.host.startswith('127.0.0.1:') or super().return_ok_secure(cookie,request)
+            opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar(policy=LoopbackTLSFixturePolicy())))
             def call(path,body=None,binary=False):
                 req=urllib.request.Request(base+path,json.dumps(body).encode() if body is not None else None,{'Content-Type':'application/json'} if body is not None else {})
                 with opener.open(req,timeout=10) as response:return response.read() if binary else json.load(response)

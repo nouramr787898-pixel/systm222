@@ -2,7 +2,7 @@ EHKAM HR Portal — Geographic Attendance Update
 
 Included in this update:
 - Company creation now requires address, latitude, longitude, and allowed attendance radius (20–1000 meters).
-- The sample company "شركة الأفق" is seeded with the Google Maps test pin supplied by the user: latitude 30.1390381, longitude 31.2558794, radius 100 meters. This is only a test pin; replace it with the real site coordinates before real use.
+- The sample company "شركة الأفق" is seeded with the Google Maps test pin supplied by the user: latitude 24.7136, longitude 46.6753, radius 100 meters. This is only a test pin; replace it with the real site coordinates before real use.
 - Employees can use the Attendance section to request browser geolocation and clock in/out.
 - Server validates coordinates and reported accuracy (must be <=100m), calculates distance to the assigned company pin, rejects requests outside the configured radius, and logs accepted punches.
 - Clock-in/out uses server time and records one entry per employee per day.

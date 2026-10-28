@@ -1,7 +1,7 @@
 // Run only against a disposable demo.py instance; never a real employee database.
 const {chromium}=require('playwright');const assert=require('node:assert/strict');
 (async()=>{const browser=await chromium.launch({executablePath:'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
-try{const context=await browser.newContext({viewport:{width:1440,height:1100},permissions:['geolocation'],geolocation:{latitude:30.1390381,longitude:31.2558794,accuracy:10}});const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+try{const context=await browser.newContext({viewport:{width:1440,height:1100},permissions:['geolocation'],geolocation:{latitude:24.7136,longitude:46.6753,accuracy:10}});const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
 async function login(role,user,password){await page.goto(process.env.EHKAM_TEST_URL||'http://127.0.0.1:8896');await page.locator(`[name=account_role][value=${role}]`).check();await page.locator('[name=username]').fill(user);await page.locator('[name=password]').fill(password);await page.locator('#loginForm [type=submit]').click();await page.locator('#shell').waitFor({state:'visible'});await page.locator('#nav button').first().waitFor()}
 async function logout(){await page.locator('#logout').click();await page.locator('#login').waitFor({state:'visible'})}
 await login('employee','employee_demo','DemoEmp@2026');await page.locator('.emp-profile').waitFor();assert((await page.locator('.emp-profile').innerText()).includes('سارة'));

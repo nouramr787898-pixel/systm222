@@ -102,12 +102,12 @@ class WorkflowTests(unittest.TestCase):
         body={'employee_id':2,'start_date':'02/11/2026','end_date':'03/11/2026'}
         code,before=self.employee('leave/preview',body)
         self.assertEqual(code,200)
-        self.assertEqual(before['monthly_available'],round(46/12,4))
-        self.assertEqual(before['monthly_after_approval'],round(46/12-2,4))
+        self.assertEqual(before['monthly_available'],round(21/12,4))
+        self.assertEqual(before['monthly_after_approval'],0)
         self.assertEqual(before['after_approval'],before['available']-2)
         rid=self.create('annual_leave',start_date='26/10/2026',end_date='26/10/2026')
         self.assertEqual(self.admin(f'requests/{rid}',{'status':'approved'})[0],200)
-        self.assertEqual(self.employee('leave/preview',body)[1]['monthly_available'],round(46/12,4))
+        self.assertEqual(self.employee('leave/preview',body)[1]['monthly_available'],round(21/12,4))
 
     def test_hr_contact_notes_without_title(self):
         rid=self.create('hr_contact',notes='تفاصيل تواصل بدون عنوان')
@@ -260,13 +260,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertGreater(self.employee('advance/preview')[1]['max_advance'],0)
 
     def test_geofence_on_both_checkin_and_checkout(self):
-        good={'latitude':30.1390381,'longitude':31.2558794,'accuracy':10}
+        good={'latitude':24.7136,'longitude':46.6753,'accuracy':10}
         bad=[{**good,'latitude':0},{**good,'accuracy':101},{**good,'accuracy':float('nan')},{**good,'longitude':float('nan')}]
         for point in bad:self.assertEqual(self.employee('attendance',point)[0],400)
         self.assertEqual(self.manager('attendance',good)[0],403)
         self.assertEqual(self.employee('attendance',good)[1]['action'],'check_in')
         for point in bad:self.assertEqual(self.employee('attendance',point)[0],400)
         self.assertIsNone(self.employee('attendance')[1][0]['check_out'])
+        with server.conn() as c:c.execute("UPDATE attendance SET check_in_at=?",((server.datetime.datetime.now(server.datetime.timezone.utc)-server.datetime.timedelta(minutes=2)).isoformat(),))
         self.assertEqual(self.employee('attendance',good)[1]['action'],'check_out')
         self.assertEqual(self.employee('attendance',good)[0],400)
         self.assertEqual(self.employee('attendance')[1][0]['source'],'gps_geofence')

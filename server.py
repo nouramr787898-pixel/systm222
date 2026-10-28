@@ -1,7 +1,7 @@
 """EHKAM HR Portal - local functional prototype. Run: python server.py"""
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import hr, sys, calendar, gps_location
+import hr, sys, calendar, gps_location, security, workforce, payroll, talent, directory_tools, permissions
 import sqlite3, json, os, hashlib, hmac, secrets, datetime, csv, io, threading, re, time, ssl, smtplib, urllib.request, urllib.parse, urllib.error, base64, html, math
 from email.message import EmailMessage
 from http.cookies import SimpleCookie
@@ -14,9 +14,10 @@ MAX_ATTACHMENTS=3
 SESSIONS={}
 LOCK=threading.Lock()
 RESET_ATTEMPTS={}
-TODAY=datetime.date.today
+from zoneinfo import ZoneInfo
+TODAY=lambda: datetime.datetime.now(ZoneInfo('Asia/Riyadh')).date()
 
-def now(): return datetime.datetime.now().isoformat(timespec='seconds')
+def now(): return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
 def hashpw(p,s=None):
  s=s or secrets.token_hex(16)
  return s+':'+hashlib.pbkdf2_hmac('sha256',p.encode(),bytes.fromhex(s),200000).hex()
@@ -81,6 +82,13 @@ def init(seeder=None,allow_create=False):
     backup=DB.with_name(DB.name+'.before-hr-v2.bak')
     if backup.exists():raise RuntimeError('HR migration backup already exists; inspect before retrying')
     with sqlite3.connect(backup) as target:existing.backup(target)
+ if DB.exists():
+  with conn() as existing:
+   if existing.execute("SELECT 1 FROM sqlite_master WHERE name='schema_migrations'").fetchone() and not existing.execute("SELECT 1 FROM schema_migrations WHERE version=?",(workforce.VERSION,)).fetchone():
+    backup=DB.with_name(DB.name+'.before-professional-v1.bak')
+    if backup.exists():raise RuntimeError('Professional migration backup exists; verify before retrying')
+    with sqlite3.connect(backup) as target:existing.backup(target)
+    os.chmod(backup,0o600)
  c=conn(allow_create=allow_create);c.executescript('''
  CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL, name_en TEXT DEFAULT '',contract_end TEXT,city TEXT DEFAULT '', address TEXT DEFAULT '', latitude REAL, longitude REAL, geofence_radius REAL NOT NULL DEFAULT 100, archived INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','manager','employee')),employee_id INTEGER,company_id INTEGER);
@@ -109,6 +117,7 @@ def init(seeder=None,allow_create=False):
  if not c.in_transaction:c.execute('BEGIN IMMEDIATE')
  migrate_workflow(c)
  hr.migrate(c)
+ workforce.migrate(c);security.migrate(c);payroll.migrate(c);talent.migrate(c);directory_tools.migrate(c);permissions.migrate(c)
  c.commit();c.close()
 
 def migrate_workflow(c):
@@ -161,6 +170,8 @@ def normalize_date(value):
 
 
 def normalize_employee_fields(d):
+ for key in ('name','name_en','job','department','branch','passport','identity_no','iban','bank_name'):
+  if key in d and (not isinstance(d[key],str) or len(d[key])>150):fail('نص الحقل غير صالح أو يتجاوز 150 حرفًا')
  for key in ('hire_date','contract_start','contract_end','birth_date'):
   if key in d:d[key]=normalize_date(d[key])
  if d.get('contract_start') and d.get('contract_end') and d['contract_end']<d['contract_start']:fail('نهاية العقد قبل بدايته')
@@ -174,6 +185,15 @@ def normalize_employee_fields(d):
    except (TypeError,ValueError):fail('قيمة مالية أو رصيد غير صالح')
    if not math.isfinite(value) or value<0:fail('القيم المالية والأرصدة يجب أن تكون غير سالبة ومحدودة')
    d[key]=value
+ for key in ('work_start','work_end'):
+  if key in d:datetime.time.fromisoformat(d[key])
+ if 'photo' in d and d['photo'] is not None:
+  photo=d['photo']
+  if not isinstance(photo,str) or len(photo)>300000 or not re.fullmatch(r'data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+',photo):fail('الصورة غير صالحة')
+  try:raw=base64.b64decode(photo.split(',',1)[1],validate=True)
+  except ValueError:fail('الصورة غير صالحة')
+  kind=photo.split(';',1)[0]
+  if not ((kind=='data:image/png' and raw.startswith(b'\x89PNG\r\n\x1a\n')) or (kind=='data:image/jpeg' and raw.startswith(b'\xff\xd8\xff')) or (kind=='data:image/webp' and raw.startswith(b'RIFF') and raw[8:12]==b'WEBP')):fail('محتوى الصورة لا يطابق نوعها')
  if 'manager_id' in d:d['manager_id']=d['manager_id'] or None
  return d
 
@@ -198,6 +218,8 @@ def validate_attachments(items):
 def request_access(c,u,r):
  user_allowed_emp(c,u,r['employee_id'])
  if r['type']=='hr_contact' and u['role']!='admin' and r['employee_id']!=u['employee_id']:fail('مراسلات الموارد البشرية خاصة بالموظف والإدارة',403)
+ permissions.request_guard(c,u,r,sys.modules[__name__])
+ if u['role']=='manager' and r['employee_id']!=u['employee_id'] and r['type'] in ('advance','sick_leave','termination','investigation'):fail('البيانات المالية والطبية والتحقيقات خاصة بالموظف والإدارة',403)
 
 class AuthevoServiceError(Exception):
  def __init__(self,code,status=None):
@@ -284,9 +306,9 @@ def authevo_verify(phone,code):
 
 def clean_contacts(d):
  country=str(d.get('phone_country') or '+966');local=re.sub(r'[^0-9]','',str(d.get('phone_local') or ''))
- if country not in ('+966','+20'):fail('رمز الدولة يجب أن يكون +966 أو +20')
+ if country != '+966':fail('النظام مخصص للسعودية؛ رمز الدولة +966')
  if local.startswith('0'):local=local[1:]
- if local and not (8<=len(local)<=10):fail('يرجى إدخال رقم جوال صحيح')
+ if local and not re.fullmatch(r'5[0-9]{8}',local):fail('يرجى إدخال رقم جوال صحيح')
  email=str(d.get('email') or '').strip().lower()
  if email and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):fail('البريد الإلكتروني غير صحيح')
  return country,local,email
@@ -307,7 +329,19 @@ def record(c,u,action,entity,eid=None,info=''):
   subject=c.execute('SELECT name,city,address,contract_end,latitude,longitude,geofence_radius FROM companies WHERE id=?',(eid,)).fetchone()
   if subject and action in ('create','update'):info=dict(subject)
  envelope={'audit_version':1,'actor_name':(actor['display_name'] or actor['username']) if actor else u['username'],'actor_role':actor['role'] if actor else u['role'],'subject_name':subject['name'] if subject else '', 'employee_no':employee_no,'request_type':request_type,'details':info}
- c.execute('INSERT INTO audit(user_id,username,action,entity,entity_id,info,timestamp) VALUES(?,?,?,?,?,?,?)',(u['id'],u['username'],action,entity,eid,json.dumps(envelope,ensure_ascii=False),now()))
+ company_id=None
+ if entity=='company':company_id=eid
+ elif entity in ('employee','attendance'):
+  row=c.execute('SELECT company_id FROM employees WHERE id=?',(eid,)).fetchone();company_id=row[0] if row else None
+ elif entity=='request':
+  row=c.execute('SELECT company_id FROM requests WHERE id=?',(eid,)).fetchone();company_id=row[0] if row else None
+ elif entity in ('schedules','work_sites','holidays'):
+  row=c.execute('SELECT company_id FROM '+entity+' WHERE id=?',(eid,)).fetchone();company_id=row[0] if row else None
+ elif entity=='user':
+  target=c.execute('SELECT * FROM users WHERE id=?',(eid,)).fetchone()
+  if target:company_id=target['company_id'] or permissions.scope_company(c,target)
+ else:company_id=u['company_id'] if 'company_id' in u.keys() and u['company_id'] else permissions.scope_company(c,u)
+ c.execute('INSERT INTO audit(user_id,username,action,entity,entity_id,info,timestamp,company_id) VALUES(?,?,?,?,?,?,?,?)',(u['id'],u['username'],action,entity,eid,json.dumps(envelope,ensure_ascii=False),now(),company_id))
 def obj(row):return dict(row) if row is not None else None
 def fail(msg,code=400):raise AppError(msg,code)
 class AppError(Exception):
@@ -316,10 +350,11 @@ class AppError(Exception):
 def user_allowed_emp(c,u,eid):
  e=c.execute('SELECT * FROM employees WHERE id=?',(eid,)).fetchone()
  if not e:fail('الموظف غير موجود',404)
- if u['role']=='admin':return e
+ if u['role']=='admin':
+  permissions.company(c,u,e['company_id'],sys.modules[__name__]);return e
  if e['company_id']!=u['company_id']:fail('غير مصرح لك بالوصول',403)
  if u['role']=='employee' and u['employee_id']!=eid:fail('غير مصرح لك بالوصول',403)
- if u['role']=='manager' and e['id']!=u['employee_id'] and e['manager_id']!=u['employee_id']:fail('غير مصرح لك بالوصول',403)
+ if u['role']=='manager' and e['id']!=u['employee_id'] and not workforce.can_manage(c,u,e,sys.modules[__name__]):fail('غير مصرح لك بالوصول',403)
  return e
 
 def salary(e):return round(e['basic']+e['housing']+e['transport']+e['other'],2)
@@ -361,23 +396,41 @@ def visible_employees(c,u,include_archived=False):
  if u['role']=='admin' and include_archived:q=q.replace('WHERE c.archived=0','WHERE 1=1')
  if not include_archived:q+=' AND e.archived=0'
  if u['role']=='employee':q+=' AND e.id=?';p=[u['employee_id']]
- elif u['role']=='manager':q+=' AND e.company_id=? AND (e.manager_id=? OR e.id=?)';p=[u['company_id'],u['employee_id'],u['employee_id']]
+ elif u['role']=='manager':q+=' AND e.company_id=? AND (e.manager_id=? OR e.id=? OR e.manager_id IN (SELECT source_manager_id FROM approval_delegations WHERE target_manager_id=? AND company_id=? AND revoked=0 AND starts_on<=? AND ends_on>=?))';p=[u['company_id'],u['employee_id'],u['employee_id'],u['employee_id'],u['company_id'],TODAY().isoformat(),TODAY().isoformat()]
+ scope=permissions.scope_company(c,u)
+ if scope is not None:q+=' AND e.company_id=?';p.append(scope)
  q+=' ORDER BY e.name'
  rows=[dict(x) for x in c.execute(q,p)]
  if u['role']=='employee':
   for x in rows:
    for sensitive in ('basic','housing','transport','other','gross_salary'):pass # their own salary permitted
- return rows
+ profile=permissions.profile(c,u)
+ if profile=='hr':
+  for e in rows:
+   for key in ('basic','housing','transport','other','gross_salary','iban','bank_name'):e.pop(key,None)
+ elif profile in ('payroll','auditor'):
+  for e in rows:
+   for key in ('passport','birth_date','photo','qualification','specialization','identity_no'):e.pop(key,None)
+ return [workforce.redact(e,u) for e in rows]
 
-def visible_requests(c,u):
+def visible_requests(c,u,include_details=True,request_id=None):
  q='''SELECT r.*,e.name employee_name,e.employee_no,c.name company_name,c.approval_mode FROM requests r JOIN employees e ON e.id=r.employee_id JOIN companies c ON c.id=r.company_id WHERE 1=1''';p=[]
  if u['role']=='employee':q+=' AND r.employee_id=?';p=[u['employee_id']]
- elif u['role']=='manager':q+=' AND r.company_id=? AND (e.manager_id=? OR r.employee_id=?)';p=[u['company_id'],u['employee_id'],u['employee_id']]
+ elif u['role']=='manager':q+=' AND r.company_id=? AND (e.manager_id=? OR r.employee_id=? OR e.manager_id IN (SELECT source_manager_id FROM approval_delegations WHERE target_manager_id=? AND company_id=? AND revoked=0 AND starts_on<=? AND ends_on>=?))';p=[u['company_id'],u['employee_id'],u['employee_id'],u['employee_id'],u['company_id'],TODAY().isoformat(),TODAY().isoformat()]
  if u['role']!='admin':q+=" AND (r.type!='hr_contact' OR r.employee_id=?)";p.append(u['employee_id'])
+ if u['role']=='manager':q+=" AND (r.type NOT IN ('advance','sick_leave','termination','investigation') OR r.employee_id=?)";p.append(u['employee_id'])
+ scope=permissions.scope_company(c,u)
+ if scope is not None:q+=' AND r.company_id=?';p.append(scope)
+ profile=permissions.profile(c,u)
+ if profile=='payroll':q+=" AND r.type='advance'"
+ elif profile=='hr':q+=" AND r.type!='advance'"
+ elif profile=='auditor':q+=" AND r.type NOT IN ('hr_contact','sick_leave','investigation')"
+ if request_id is not None:q+=' AND r.id=?';p.append(request_id)
  q+=' ORDER BY r.id DESC'
  rows=[dict(x) for x in c.execute(q,p)]
  for row in rows:
   row['details']=json.loads(row['details'])
+  if not include_details:continue
   creator=c.execute('SELECT username,display_name FROM users WHERE id=?',(row['created_by'],)).fetchone()
   row['creator_name']=creator['display_name'] or creator['username'] if creator else 'حساب سابق'
   row['comments']=[dict(x) for x in c.execute('SELECT username,message,created_at FROM request_comments WHERE request_id=? ORDER BY id',(row['id'],))]
@@ -387,41 +440,114 @@ def visible_requests(c,u):
 
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*a):pass
+ def setup(self):
+  super().setup();self.connection.settimeout(20)
  def write(self,data,status=200,ctype='application/json',headers=None):
   if isinstance(data,(dict,list)):data=json.dumps(data,ensure_ascii=False).encode()
   elif isinstance(data,str):data=data.encode()
   self.send_response(status);self.send_header('Content-Type',ctype+('; charset=utf-8' if ctype.startswith('text/') or ctype=='application/json' else ''));self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store')
+  for k,v in {'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'same-origin','Permissions-Policy':'geolocation=(self), camera=(), microphone=()'}.items():self.send_header(k,v)
   for k,v in (headers or {}).items():self.send_header(k,v)
   self.end_headers();self.wfile.write(data)
  def input(self):
+  if hasattr(self,'_parsed_body'):return self._parsed_body
   n=int(self.headers.get('Content-Length','0'))
   if n<0 or n>9*1024*1024:fail('الطلب كبير جدًا',413)
   try:
    data=json.loads(self.rfile.read(n) or b'{}')
    if not isinstance(data,dict):fail('بيانات JSON يجب أن تكون كائنًا')
+   self._parsed_body=data
    return data
   except Exception:fail('بيانات JSON غير صالحة')
  def actor(self,c):
   cookie=SimpleCookie();cookie.load(self.headers.get('Cookie',''))
   token=cookie.get('ehkam_session');value=token.value if token else ''
-  with LOCK:uid=SESSIONS.get(value)
+  uid=security.actor(c,value)
   if not uid:fail('يرجى تسجيل الدخول',401)
-  u=c.execute('SELECT id,username,role,employee_id,company_id FROM users WHERE id=?',(uid,)).fetchone()
+  u=c.execute('SELECT id,username,role,employee_id,company_id,must_change_password,disabled FROM users WHERE id=?',(uid,)).fetchone()
   if not u:fail('جلسة غير صالحة',401)
   if not self.account_active(c,u):fail('الحساب غير نشط؛ راجع الإدارة',403)
   return u
  def account_active(self,c,u):
+  if c.execute('SELECT disabled FROM users WHERE id=?',(u['id'],)).fetchone()[0]:return False
   if u['role']=='admin':return True
   return bool(c.execute('SELECT 1 FROM employees e JOIN companies co ON co.id=e.company_id WHERE e.id=? AND e.company_id=? AND e.archived=0 AND co.archived=0',(u['employee_id'],u['company_id'])).fetchone())
+ def account_routes(self,c,u,path,method):
+  if path=='/api/security/mfa' and method=='POST':
+   import base64
+   d=self.input();full=c.execute('SELECT password_hash FROM users WHERE id=?',(u['id'],)).fetchone()
+   security.attempt(c,u['username'],security.peer(self),sys.modules[__name__])
+   if not verifypw(str(d.get('password','')),full[0]):fail('كلمة المرور الحالية غير صحيحة',403)
+   action=d.get('action');row=c.execute('SELECT * FROM user_mfa WHERE user_id=?',(u['id'],)).fetchone()
+   if action=='enroll':
+    if row and row['enabled']:fail('المصادقة مفعلة بالفعل؛ عطّلها أولًا')
+    secret=base64.b32encode(secrets.token_bytes(20)).decode()
+    c.execute('INSERT INTO user_mfa(user_id,secret) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET secret=excluded.secret',(u['id'],secret));c.commit();self.write({'secret':secret,'issuer':'EHKAM','account':u['username']});return True
+   if action=='confirm':
+    if not row or row['enabled']:fail('ابدأ إعداد المصادقة أولًا')
+    step=int(time.time())//30
+    if not any(hmac.compare_digest(security.totp(row['secret'],n),str(d.get('otp',''))) for n in (step-1,step,step+1)):fail('رمز المصادقة غير صالح')
+    c.execute('UPDATE user_mfa SET enabled=1,last_step=? WHERE user_id=?',(step,u['id']))
+   elif action=='disable':
+    security.verify_mfa(c,u['id'],d.get('otp',''),sys.modules[__name__]);c.execute('DELETE FROM user_mfa WHERE user_id=?',(u['id'],))
+   else:fail('إجراء غير صالح')
+   record(c,u,'mfa_'+action,'user',u['id']);c.commit();self.write({'ok':True});return True
+  if re.fullmatch('/api/admin/accounts/[0-9]+',path) and method=='POST':
+   if permissions.profile(c,u)!='owner':fail('إدارة الحسابات للإدارة العامة فقط',403)
+   d=self.input();security.attempt(c,u['username'],security.peer(self),sys.modules[__name__]);full=c.execute('SELECT password_hash FROM users WHERE id=?',(u['id'],)).fetchone()
+   if not verifypw(str(d.get('password','')),full[0]):fail('كلمة المرور الحالية غير صحيحة',403)
+   target=int(path.rsplit('/',1)[1]);row=c.execute("SELECT * FROM users WHERE id=? AND role='admin'",(target,)).fetchone()
+   if not row or target==u['id']:fail('لا يمكن تعديل صلاحيات حسابك من هذا الإجراء')
+   chosen=d.get('profile');scope=int(d['company_scope']) if d.get('company_scope') else None;disabled=d.get('disabled',False)
+   if chosen not in ('owner','hr','payroll','auditor') or not isinstance(disabled,bool):fail('دور أو حالة غير صالحة')
+   if chosen=='owner' and scope:fail('الإدارة العامة ليست مقيدة بشركة؛ اختر دورًا آخر')
+   if scope and not c.execute('SELECT 1 FROM companies WHERE id=? AND archived=0',(scope,)).fetchone():fail('شركة غير متاحة')
+   c.execute('DELETE FROM admin_profiles WHERE user_id=?',(target,))
+   if chosen!='owner':c.execute('INSERT INTO admin_profiles(user_id,profile,company_id) VALUES(?,?,?)',(target,chosen,scope))
+   c.execute('UPDATE users SET disabled=? WHERE id=?',(int(disabled),target));c.execute('DELETE FROM auth_sessions WHERE user_id=?',(target,))
+   record(c,u,'admin_access_update','user',target,{'profile':chosen,'company_scope':scope,'disabled':disabled});c.commit();self.write({'ok':True});return True
+  if path=='/api/admin/accounts':
+   if u['role']!='admin':fail('غير مصرح',403)
+   if method=='GET':
+    self.write([dict(r) for r in c.execute("SELECT u.id,u.username,u.display_name,u.role,u.disabled,COALESCE(p.profile,'owner') profile,p.company_id company_scope FROM users u LEFT JOIN admin_profiles p ON p.user_id=u.id WHERE u.role='admin'")]);return True
+   d=self.input();security.attempt(c,u['username'],security.peer(self),sys.modules[__name__]);full=c.execute('SELECT password_hash FROM users WHERE id=?',(u['id'],)).fetchone()
+   if not verifypw(str(d.get('password','')),full[0]):fail('كلمة المرور الحالية غير صحيحة',403)
+   username=str(d.get('username','')).strip();password=str(d.get('new_password',''));name=str(d.get('display_name','')).strip()
+   if not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}',username) or not 16<=len(password)<=128 or not name:fail('اسم دخول 3–64 حرفًا وكلمة مرور 16–128 حرفًا واسم معروض مطلوبون')
+   if c.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():fail('اسم الدخول مستخدم')
+   chosen=d.get('profile','owner')
+   if chosen not in ('owner','hr','payroll','auditor'):fail('دور إداري غير صالح')
+   if chosen=='owner' and d.get('company_scope'):fail('الإدارة العامة ليست مقيدة بشركة')
+   cur=c.execute("INSERT INTO users(username,password_hash,role,display_name) VALUES(?,?,'admin',?)",(username,hashpw(password),name[:150]))
+   if chosen!='owner':
+    scope=int(d['company_scope']) if d.get('company_scope') else None
+    if scope and not c.execute('SELECT 1 FROM companies WHERE id=? AND archived=0',(scope,)).fetchone():fail('شركة غير متاحة')
+    c.execute('INSERT INTO admin_profiles(user_id,profile,company_id) VALUES(?,?,?)',(cur.lastrowid,chosen,scope))
+   record(c,u,'admin_account_create','user',cur.lastrowid);c.commit();self.write({'id':cur.lastrowid},201);return True
+  if path=='/api/security/sessions' and method=='GET':
+   self.write([dict(r) for r in c.execute('SELECT substr(token_hash,1,16) id,created_at,last_seen,expires_at,user_agent FROM auth_sessions WHERE user_id=? ORDER BY created_at DESC',(u['id'],))]);return True
+  if path=='/api/security/revoke' and method=='POST':
+   d=self.input();full=c.execute('SELECT password_hash FROM users WHERE id=?',(u['id'],)).fetchone()
+   if not verifypw(str(d.get('password','')),full[0]):fail('كلمة المرور الحالية غير صحيحة',403)
+   c.execute('DELETE FROM auth_sessions WHERE user_id=?',(u['id'],));record(c,u,'sessions_revoked','user',u['id']);c.commit();self.write({'ok':True});return True
+  if path=='/api/security/password' and method=='POST':
+   d=self.input();full=c.execute('SELECT password_hash FROM users WHERE id=?',(u['id'],)).fetchone()
+   security.attempt(c,u['username'],security.peer(self),sys.modules[__name__])
+   password=str(d.get('new_password',''))
+   if not verifypw(str(d.get('current_password','')),full[0]):fail('كلمة المرور الحالية غير صحيحة',403)
+   if not 12<=len(password)<=128 or password==str(d.get('current_password','')):fail('كلمة المرور الجديدة 12–128 حرفًا ومختلفة عن الحالية')
+   c.execute('UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?',(hashpw(password),u['id']));c.execute('DELETE FROM auth_sessions WHERE user_id=?',(u['id'],));record(c,u,'password_change','user',u['id']);c.commit();self.write({'ok':True});return True
+  return False
  def do_GET(self):self.process('GET')
  def do_POST(self):self.process('POST')
  def process(self,method):
+  if hasattr(self,'_parsed_body'):del self._parsed_body
   path=urlparse(self.path).path
   if method=='GET' and path=='/api/health':
    try:
     health=sqlite3.connect(DB.resolve().as_uri()+'?mode=ro',uri=True)
     try:
-     ready=health.execute("SELECT 1 FROM schema_migrations WHERE version='hr-v2'").fetchone()
+     ready=health.execute("SELECT 1 FROM schema_migrations WHERE version='professional-v1'").fetchone()
      health.execute('SELECT 1 FROM users LIMIT 1').fetchone()
      expected=os.environ.get('EHKAM_DB_ID','').strip()
      if expected:
@@ -430,30 +556,34 @@ class Handler(BaseHTTPRequestHandler):
     finally:health.close()
     if not ready:raise RuntimeError('schema_not_ready')
     revision=os.environ.get('RAILWAY_GIT_COMMIT_SHA','')
-    return self.write({'status':'ok','release':'hr-reviewed-v2','database':'ok','commit':revision if re.fullmatch(r'[0-9a-fA-F]{40}',revision) else None})
-   except (sqlite3.Error,RuntimeError):return self.write({'status':'unavailable','release':'hr-reviewed-v2'},503)
+    return self.write({'status':'ok','release':'professional-v1','database':'ok','commit':revision if re.fullmatch(r'[0-9a-fA-F]{40}',revision) else None})
+   except (sqlite3.Error,RuntimeError):return self.write({'status':'unavailable','release':'professional-v1'},503)
   if method=='GET' and path in ('/','/index.html'):
    return self.write((BASE/'index.html').read_bytes(),ctype='text/html')
   if method=='GET' and path=='/style.css':return self.write((BASE/'style.css').read_bytes(),ctype='text/css')
   if method=='GET' and path=='/i18n.js':return self.write((BASE/'i18n.js').read_bytes(),ctype='text/javascript')
+  if method=='GET' and path=='/professional-ui.js':return self.write((BASE/'professional-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/hr-ui.js':return self.write((BASE/'hr-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/app.js':return self.write((BASE/'app.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path in ('/favicon.ico','/favicon.png','/ehkam-icon.png','/ehkam-logo-full.png'):
    return self.write((BASE/path.lstrip('/')).read_bytes(),ctype='image/x-icon' if path.endswith('.ico') else 'image/png')
   c=conn()
   try:
+   if method=='POST':security.same_origin(self,sys.modules[__name__])
    if method=='POST' and path=='/api/login':
-    d=self.input();u=c.execute('SELECT * FROM users WHERE username=?',(str(d.get('username','')).strip(),)).fetchone()
-    if not u or not verifypw(d.get('password',''),u['password_hash']) or u['role']!=d.get('account_role'):fail('بيانات الدخول أو نوع الحساب غير صحيحة',401)
+    d=self.input();username=str(d.get('username','')).strip()[:128];security.attempt(c,username,security.peer(self),sys.modules[__name__]);u=c.execute('SELECT * FROM users WHERE username=?',(username,)).fetchone()
+    if not u or not verifypw(str(d.get('password',''))[:128],u['password_hash']) or u['role']!=d.get('account_role'):
+     c.execute('INSERT INTO audit(user_id,username,action,entity,info,timestamp) VALUES(NULL,?,"login_failed","user",?,?)',(username,json.dumps({'peer_hash':security.digest(security.peer(self))}),now()));c.commit();fail('بيانات الدخول أو نوع الحساب غير صحيحة',401)
     if not self.account_active(c,u):fail('الحساب غير نشط؛ راجع الإدارة',403)
-    token=secrets.token_urlsafe(32)
-    with LOCK:SESSIONS[token]=u['id']
+    security.verify_mfa(c,u['id'],d.get('otp',''),sys.modules[__name__])
+    token=security.create(c,u['id'],self.headers.get('User-Agent',''))
     record(c,u,'login','user',u['id']);c.commit()
-    return self.write({'ok':True},headers={'Set-Cookie':'ehkam_session='+token+'; HttpOnly; SameSite=Strict; Path=/'})
+    return self.write({'ok':True},headers={'Set-Cookie':'ehkam_session='+token+'; HttpOnly; SameSite=Strict; Path=/'+('; Secure' if persistent_database_required() else '')})
    if method=='POST' and path=='/api/password/request':
-    d=self.input();username=str(d.get('username','')).strip();requested=str(d.get('channel') or 'email').strip().lower();ip=self.client_address[0]
+    d=self.input();username=str(d.get('username','')).strip();requested=str(d.get('channel') or 'email').strip().lower();ip=security.peer(self)
     if requested not in ('email','whatsapp','dual'):requested='email'
     if not username:fail('اسم المستخدم مطلوب')
+    security.attempt(c,'reset:'+username,security.peer(self),sys.modules[__name__])
     current=int(time.time());key=(ip,username,requested)
     with LOCK:
      timestamps=[t for t in RESET_ATTEMPTS.get(key,[]) if current-t<3600]
@@ -470,7 +600,7 @@ class Handler(BaseHTTPRequestHandler):
     if local.startswith('0'):local=local[1:]
     phone=country+local
     valid_email=bool(re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',destination))
-    valid_phone=country in ('+966','+20') and (8<=len(local)<=10)
+    valid_phone=country == '+966' and bool(re.fullmatch(r'5[0-9]{8}',local))
     c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(u['id'],))
     if requested=='dual':
      if not valid_email or not valid_phone:return self.write(generic)
@@ -532,7 +662,7 @@ class Handler(BaseHTTPRequestHandler):
     c.execute('UPDATE password_resets SET verified_token_hash=? WHERE id=?',(hashlib.sha256(grant.encode()).hexdigest(),r['id']))
     c.commit();return self.write({'ok':True,'reset_token':grant})
    if method=='POST' and path=='/api/password/whatsapp/send':
-    d=self.input();username=str(d.get('username','')).strip();ip=self.client_address[0];current=int(time.time())
+    d=self.input();username=str(d.get('username','')).strip();ip=security.peer(self);current=int(time.time())
     with LOCK:
      key=(ip,username,'whatsapp')
      attempts=[t for t in RESET_ATTEMPTS.get(key,[]) if current-t<3600]
@@ -551,7 +681,7 @@ class Handler(BaseHTTPRequestHandler):
    if method=='POST' and path=='/api/password/confirm':
     d=self.input();username=str(d.get('username','')).strip();password=str(d.get('new_password',''))
     grant=str(d.get('reset_token',''))
-    if len(password)<10 or len(password)>128:fail('كلمة المرور الجديدة 10 أحرف على الأقل',400)
+    if len(password)<12 or len(password)>128:fail('كلمة المرور الجديدة 12 حرفًا على الأقل',400)
     if len(grant)<40 or len(grant)>200:fail('يجب التحقق من الرمز أولًا',403)
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
     if not u:fail('التحقق غير صالح أو منتهي',403)
@@ -565,34 +695,45 @@ class Handler(BaseHTTPRequestHandler):
     if not valid:fail('التحقق غير صالح أو منتهي',403)
     changed=c.execute('UPDATE password_resets SET used=1,verified_token_hash=NULL WHERE id=? AND used=0 AND verified_token_hash=?',(r['id'],r['verified_token_hash']))
     if changed.rowcount!=1:fail('تم استخدام رمز التحقق بالفعل',403)
-    c.execute('UPDATE users SET password_hash=? WHERE id=?',(hashpw(password),u['id']))
+    c.execute('UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?',(hashpw(password),u['id']))
     with LOCK:
      for token,uid in list(SESSIONS.items()):
       if uid==u['id']:SESSIONS.pop(token,None)
+    c.execute('DELETE FROM auth_sessions WHERE user_id=?',(u['id'],))
     record(c,u,'password_reset','user',u['id']);c.commit();return self.write({'ok':True})
    u=self.actor(c)
+   permissions.guard(self,c,u,path,method,sys.modules[__name__])
+   if u['must_change_password'] and path not in ('/api/me','/api/security/password','/api/security/sessions','/api/logout'):fail('غيّر كلمة المرور المؤقتة من أمان الحساب أولًا',403)
+   if directory_tools.handle(self,c,u,path,method,sys.modules[__name__]):return
+   if talent.handle(self,c,u,path,method,sys.modules[__name__]):return
+   if workforce.handle(self,c,u,path,method,sys.modules[__name__]):return
+   if payroll.handle(self,c,u,path,method,sys.modules[__name__]):return
+   if self.account_routes(c,u,path,method):return
    if hr.handle(self,c,u,path,method,sys.modules[__name__]):return
    if path=='/api/supervisors' and method=='GET':
     if u['role']!='admin':fail('غير مصرح',403)
-    return self.write([dict(x) for x in c.execute("SELECT e.id,e.name,e.company_id,u.username FROM employees e JOIN users u ON u.employee_id=e.id AND u.role='manager' AND u.company_id=e.company_id WHERE e.archived=0")])
-   if path=='/api/me' and method=='GET':return self.write(dict(u))
+    return self.write(permissions.filter_rows(c,u,c.execute("SELECT e.id,e.name,e.company_id,u.id user_id,u.username FROM employees e JOIN users u ON u.employee_id=e.id AND u.role='manager' AND u.company_id=e.company_id WHERE e.archived=0")))
+   if path=='/api/me' and method=='GET':return self.write({**dict(u),'timezone':'Asia/Riyadh','currency':'SAR','profile':permissions.profile(c,u),'company_scope':permissions.scope_company(c,u)})
    if path=='/api/logout' and method=='POST':
     record(c,u,'logout','user',u['id']);c.commit()
     cookie=SimpleCookie();cookie.load(self.headers.get('Cookie',''));v=cookie.get('ehkam_session')
     if v:
      with LOCK:SESSIONS.pop(v.value,None)
+     c.execute('DELETE FROM auth_sessions WHERE token_hash=?',(security.digest(v.value),));c.commit()
     return self.write({'ok':True},headers={'Set-Cookie':'ehkam_session=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/'})
    if path=='/api/dashboard' and method=='GET':
-    es=visible_employees(c,u);rr=visible_requests(c,u)
-    co=c.execute('SELECT COUNT(*) FROM companies WHERE archived=0').fetchone()[0] if u['role']=='admin' else 1
-    return self.write({'companies':co,'employees':len(es),'requests':len(rr),'pending':sum(r['status'] in ('new','review') for r in rr),'recent':rr[:5]})
+    es=visible_employees(c,u);rr=visible_requests(c,u,False)
+    co=c.execute('SELECT COUNT(*) FROM companies WHERE archived=0 AND (? IS NULL OR id=?)',(permissions.scope_company(c,u),permissions.scope_company(c,u))).fetchone()[0] if u['role']=='admin' else 1
+    present=sum(bool(c.execute('SELECT 1 FROM attendance WHERE employee_id=? AND day=? AND check_in IS NOT NULL',(e['id'],TODAY().isoformat())).fetchone()) for e in es)
+    expiring=sum(bool(e['contract_end'] and TODAY().isoformat()<=e['contract_end']<=(TODAY()+datetime.timedelta(days=60)).isoformat()) for e in es)
+    return self.write({'companies':co,'employees':len(es),'requests':len(rr),'pending':sum(r['status'] in ('new','review') for r in rr),'recent':rr[:5],'attendance_today':present,'contracts_expiring':expiring,'request_states':{status:sum(r['status']==status for r in rr) for status in ('new','review','approved','rejected')},'as_of':TODAY().isoformat()})
    if path=='/api/companies' and method=='GET':
     if u['role']!='admin':fail('غير مصرح',403)
-    return self.write([dict(x) for x in c.execute('''SELECT c.*,(SELECT COUNT(*) FROM employees e WHERE e.company_id=c.id AND e.archived=0) staff_count,(SELECT COUNT(*) FROM requests r WHERE r.company_id=c.id AND r.status IN ('new','review')) pending_count FROM companies c ORDER BY c.archived,c.id DESC''')])
+    return self.write(permissions.filter_rows(c,u,c.execute('''SELECT c.*,(SELECT COUNT(*) FROM employees e WHERE e.company_id=c.id AND e.archived=0) staff_count,(SELECT COUNT(*) FROM requests r WHERE r.company_id=c.id AND r.status IN ('new','review')) pending_count FROM companies c ORDER BY c.archived,c.id DESC'''),key='id'))
    if (path=='/api/companies' or re.fullmatch(r'/api/companies/[0-9]+',path)) and method=='POST':
     if u['role']!='admin':fail('غير مصرح',403)
     d=self.input();name=str(d.get('name','')).strip()
-    if not name:fail('اسم الشركة مطلوب')
+    if not name or len(name)>150:fail('اسم الشركة مطلوب ولا يتجاوز 150 حرفًا')
     previous=c.execute('SELECT * FROM companies WHERE id=?',(int(path.rsplit('/',1)[1]),)).fetchone() if path!='/api/companies' else None
     gps=str(d.get('gps_url',previous['gps_url'] if previous else '') or '').strip()
     try:
@@ -627,7 +768,7 @@ class Handler(BaseHTTPRequestHandler):
     number=c.execute('UPDATE employee_number_sequence SET value=value+1 WHERE id=1 RETURNING value').fetchone()[0]
     d['employee_no']=f'EH-{number:04d}'
     country,phone,email=clean_contacts(d)
-    username=str(d['name']).strip();newpw=str(d.get('login_password',''))
+    username=str(d.get('username') or d['name']).strip();newpw=str(d.get('login_password',''))
     if not username or len(username)>128 or any(ord(ch)<32 for ch in username) or len(newpw)<10 or len(newpw)>128:fail('اسم موظف صالح لا يتجاوز 128 حرفًا وكلمة مرور 10–128 حرفًا مطلوبان')
     if c.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():fail('اسم المستخدم مستخدم بالفعل')
     extra_employee=['passport','nationality','birth_date','qualification','specialization','branch','iban','bank_name']
@@ -668,8 +809,13 @@ class Handler(BaseHTTPRequestHandler):
      m=c.execute("SELECT e.company_id FROM employees e JOIN users u ON u.employee_id=e.id AND u.role='manager' AND u.company_id=e.company_id WHERE e.id=?",(changes['manager_id'],)).fetchone()
      if int(changes['manager_id'])==eid or not m or m['company_id']!=e['company_id']:fail('المشرف يجب أن يتبع نفس الشركة')
     if any(key in changes for key in ('contract_start','contract_end')) and c.execute('SELECT 1 FROM contracts WHERE employee_id=? AND closed_at IS NOT NULL',(eid,)).fetchone():fail('استخدم تجديد العقد للحفاظ على الأرصدة السابقة')
+    c.execute('BEGIN IMMEDIATE')
+    payroll.assert_open(c,eid,TODAY().isoformat(),TODAY().isoformat(),sys.modules[__name__])
+    if any(k in changes for k in ('contract_start','contract_end','carryover')) and c.execute('SELECT 1 FROM requests WHERE employee_id=? LIMIT 1',(eid,)).fetchone():
+     if any(changes.get(k,e[k])!=e[k] for k in ('contract_start','contract_end','carryover')):fail('العقد والرصيد الافتتاحي لهما حركات؛ استخدم التجديد أو تسوية موثقة بدل تعديلهما')
     c.execute('UPDATE employees SET '+','.join(k+'=?' for k in changes)+' WHERE id=?',list(changes.values())+[eid])
     fresh=c.execute('SELECT * FROM employees WHERE id=?',(eid,)).fetchone()
+    workforce.save_terms(c,e,fresh,normalize_date(d.get('effective_on')) or TODAY().isoformat(),u['id'],d.get('change_reason') or 'تعديل إداري موثق',sys.modules[__name__])
     c.execute('UPDATE contracts SET start_date=?,end_date=?,entitlement=?,opening=? WHERE employee_id=? AND closed_at IS NULL',(fresh['contract_start'],fresh['contract_end'],fresh['annual_entitlement'],fresh['carryover'],eid))
     c.execute('UPDATE users SET display_name=? WHERE employee_id=?',(fresh['name'],eid))
     record(c,u,'update','employee',eid,{k:{'before':('صورة سابقة' if e[k] else 'بدون صورة') if k=='photo' else e[k] if k in e.keys() else None,'after':'تم تحديث الصورة' if k=='photo' else v} for k,v in changes.items()});c.commit();return self.write({'ok':True})
@@ -685,14 +831,22 @@ class Handler(BaseHTTPRequestHandler):
     if not attachment:fail('المرفق غير موجود',404)
     r=c.execute('SELECT * FROM requests WHERE id=?',(attachment['request_id'],)).fetchone()
     request_access(c,u,r)
+    if u['role']=='manager' and r['employee_id']!=u['employee_id']:fail('مرفقات الطلبات خاصة بالموظف والإدارة',403)
+    record(c,u,'attachment_download','request',r['id'],{'attachment_id':aid});c.commit()
     filename=urllib.parse.quote(attachment['name'],safe='')
     return self.write(attachment['content'],ctype=attachment['mime'],headers={'Content-Disposition':"attachment; filename*=UTF-8''"+filename,'X-Content-Type-Options':'nosniff'})
    if re.fullmatch(r'/api/requests/[0-9]+',path) and method=='GET':
     rid=int(path.rsplit('/',1)[1]);row=c.execute('SELECT * FROM requests WHERE id=?',(rid,)).fetchone()
     if not row:fail('الطلب غير موجود',404)
     request_access(c,u,row);record(c,u,'view','request',rid);c.commit()
-    return self.write(next(r for r in visible_requests(c,u) if r['id']==rid))
-   if path=='/api/requests' and method=='GET':return self.write(visible_requests(c,u))
+    return self.write(visible_requests(c,u,request_id=rid)[0])
+   if path=='/api/requests' and method=='GET':
+    summary=parse_qs(urlparse(self.path).query).get('summary',['0'])[0]=='1'
+    rows=visible_requests(c,u,not summary)
+    if summary:
+     for row in rows:
+      for key in ('details','notes','decision_note'):row.pop(key,None)
+    return self.write(rows)
    if path=='/api/requests' and method=='POST':
     d=self.input();c.execute('BEGIN IMMEDIATE');eid=int(d.get('employee_id',u['employee_id'] or 0));e=user_allowed_emp(c,u,eid)
     if u['role']=='manager' and d.get('type') not in ('delegation','hr_contact'):fail('المشرف ينشئ الانتداب أو مراسلته الشخصية للموارد البشرية فقط',403)
@@ -700,6 +854,7 @@ class Handler(BaseHTTPRequestHandler):
     if u['role']!='manager' and d.get('type')=='delegation':fail('الانتداب يبدأ من المشرف فقط',403)
     if d.get('type')=='hr_contact' and u['role']!='admin' and eid!=u['employee_id']:fail('يمكنك إرسال مراسلتك الشخصية فقط',403)
     attachments=validate_attachments(d.get('attachments',[]))
+    if len(str(d.get('notes','')))>4000:fail('الملاحظات لا تتجاوز 4000 حرف')
     typ=d.get('type');allowed={'annual_leave','sick_leave','unpaid_leave','advance','permission','punch_fix','hr_contact','investigation','termination','delegation','open'}
     if typ not in allowed:fail('نوع الطلب غير صالح')
     ended=hr.employment_end(c,e)
@@ -723,13 +878,14 @@ class Handler(BaseHTTPRequestHandler):
     if typ=='advance':
      limit=round(salary(e)*.35*remaining_months(hr.employment_end(c,e),TODAY()),2)
      if amount<=0 or amount>limit:fail('طلب السلفة يتجاوز الحد المستحق: '+str(limit)+' ريال')
+     payroll.validate_advance(c,e,amount,inst,sys.modules[__name__])
      if inst<=0 or inst>salary(e)*.35:fail('القسط الشهري يتجاوز 35% من الراتب')
      if inst*remaining_months(hr.employment_end(c,e),TODAY())<amount:fail('القسط لا يسدد السلفة قبل انتهاء العقد')
      minimum=c.execute('SELECT advance_min_days FROM companies WHERE id=?',(e['company_id'],)).fetchone()[0]
      if not e['contract_end'] or (datetime.date.fromisoformat(e['contract_end'])-TODAY()).days<minimum:fail('مدة العقد المتبقية أقل من الحد المسموح في سياسة الشركة')
     if typ=='sick_leave' and not d.get('notes') and not attachments:fail('أضف ملاحظات أو مستندًا طبيًا')
     if typ=='punch_fix' and not a:fail('تاريخ التصحيح مطلوب')
-    if typ=='delegation' and u['employee_id']!=e['manager_id']:fail('يمكن للمشرف إصدار انتداب لموظفيه فقط')
+    if typ=='delegation' and not workforce.can_manage(c,u,e,sys.modules[__name__]):fail('يمكن للمشرف إصدار انتداب لموظفيه فقط')
     ts=now();cur=c.execute('''INSERT INTO requests(company_id,employee_id,type,start_date,end_date,days,amount,installment,notes,created_by,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',(e['company_id'],eid,typ,a,b,days,amount,inst,str(d.get('notes','')),u['id'],e['manager_id'],ts,ts))
     c.execute('UPDATE requests SET details=?,contract_id=? WHERE id=?',(json.dumps(detail,ensure_ascii=False),hr.ensure_contract(c,e),cur.lastrowid))
     hr.notify(c,c.execute('SELECT * FROM requests WHERE id=?',(cur.lastrowid,)).fetchone(),sys.modules[__name__],'تم تسجيل طلب جديد',u)
@@ -744,31 +900,44 @@ class Handler(BaseHTTPRequestHandler):
     if r['type']=='investigation' and u['role']!='admin':fail('معالجة التحقيق من اختصاص الإدارة',403)
     if r['type']=='annual_leave' and r['contract_id']!=hr.ensure_contract(c,e):fail('لا يمكن تغيير طلب تابع لعقد سبق ترحيله')
     if action in ('rejected','declined') and not note:fail('سبب الرفض مطلوب')
+    if action=='withdrawn':
+     if r['created_by']!=u['id'] or r['status'] not in ('new','review'):fail('يمكنك سحب طلبك المعلق فقط',403)
+     action='cancelled'
+    elif action=='cancelled' and u['role']!='admin':fail('إلغاء الطلب المعتمد متاح للإدارة فقط',403)
     if action not in ('review','approved','rejected','cancelled','closed','accepted','declined'):fail('حالة غير صحيحة')
     if r['status'] not in ('new','review') and not (action=='cancelled' and r['status']=='approved'):fail('لا يمكن تغيير هذه الحالة')
     if action in ('review','approved','rejected','closed'):
      if u['role']=='employee' or u['employee_id']==e['id']:fail('لا يمكن اعتماد طلبك',403)
-     if u['role']=='manager' and e['manager_id']!=u['employee_id']:fail('ليس من موظفيك',403)
+     if u['role']=='manager' and not workforce.can_manage(c,u,e,sys.modules[__name__]):fail('ليس من موظفيك',403)
      if r['type']=='delegation':fail('الانتداب ينتظر قبول أو رفض الموظف')
     if action in ('accepted','declined'):
      if r['type']!='delegation' or u['role']!='employee' or u['employee_id']!=r['employee_id']:fail('فقط الموظف المعني ينتدبه المدير',403)
      if action=='declined' and not str(d.get('note','')).strip():fail('اذكر سبب رفض الانتداب',400)
-    if action=='cancelled' and u['role']!='admin':fail('إلغاء الطلب المعتمد متاح للإدارة فقط في النموذج الأولي',403)
+    if action=='cancelled' and r['status']=='approved':
+     if r['type']=='advance' and c.execute('SELECT 1 FROM loans WHERE request_id=?',(rid,)).fetchone():fail('لا يمكن إلغاء سلفة مصروفة؛ سجل التسوية المالية',409)
+     if r['type']=='punch_fix':fail('التصحيح المعتمد لا يلغى؛ يلزم تصحيح لاحق يحفظ السجل',409)
+     if r['type']=='termination' and c.execute('SELECT 1 FROM settlements WHERE request_id=?',(rid,)).fetchone():fail('الإنهاء له تسوية مالية؛ يلزم تسوية عكسية منفصلة',409)
+    if r['start_date'] and r['end_date']:payroll.assert_open(c,e['id'],r['start_date'],r['end_date'],sys.modules[__name__])
+    if action=='approved' and r['type']=='advance':payroll.validate_advance(c,e,r['amount'],r['installment'],sys.modules[__name__],rid)
+    if r['type']=='termination':
+     last=json.loads(r['details']).get('last_work_day')
+     if last:payroll.assert_open(c,e['id'],last,e['contract_end'] or '9999-12-31',sys.modules[__name__])
+    if (action=='approved' and r['type'] in ('annual_leave','sick_leave','unpaid_leave')) or (action=='accepted' and r['type']=='delegation'):workforce.overlap(c,e['id'],r['start_date'],r['end_date'],rid,sys.modules[__name__])
     if action=='approved' and r['type']=='annual_leave':
      if c.execute("SELECT 1 FROM requests WHERE employee_id=? AND id!=? AND status='approved' AND type IN ('annual_leave','sick_leave','unpaid_leave') AND start_date<=? AND end_date>=?",(e['id'],rid,r['end_date'],r['start_date'])).fetchone():fail('توجد إجازة معتمدة متداخلة')
      if r['days']>leave(c,e)['available']:fail('الرصيد غير كافٍ عند الاعتماد')
     decision_status=action
     approval=c.execute('SELECT approval_mode FROM companies WHERE id=?',(e['company_id'],)).fetchone()[0]
-    if r['type'] not in ('delegation','hr_contact','investigation') and action in ('approved','rejected','review'):
+    if r['type'] not in ('delegation','hr_contact','investigation','sick_leave','advance','termination') and action in ('approved','rejected','review'):
      if approval=='admin_only' and u['role']!='admin':fail('سياسة الشركة تقصر الاعتماد على الإدارة',403)
      if approval=='supervisor_then_admin' and action=='approved' and e['manager_id']:
       if u['role']=='manager':
        if c.execute("SELECT 1 FROM request_decisions WHERE request_id=? AND status='manager_approved'",(rid,)).fetchone():fail('تمت موافقة المشرف بالفعل؛ الطلب ينتظر الإدارة')
        decision_status='manager_approved';action='review'
-      elif not c.execute("SELECT 1 FROM request_decisions d JOIN users u ON u.id=d.user_id WHERE d.request_id=? AND d.status='manager_approved' AND u.employee_id=?",(rid,e['manager_id'])).fetchone():fail('ينتظر الطلب موافقة المشرف أولًا')
+      elif not c.execute("SELECT 1 FROM request_decisions d JOIN users u ON u.id=d.user_id WHERE d.request_id=? AND d.status='manager_approved' AND COALESCE(d.effective_manager_id,u.employee_id)=?",(rid,e['manager_id'])).fetchone():fail('ينتظر الطلب موافقة المشرف أولًا')
     stamp=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
     c.execute('UPDATE requests SET status=?,decision_note=?,updated_at=? WHERE id=?',(action,note,stamp,rid))
-    c.execute('INSERT INTO request_decisions(request_id,user_id,username,status,note,decided_at) VALUES(?,?,?,?,?,?)',(rid,u['id'],u['username'],decision_status,note,stamp))
+    c.execute('INSERT INTO request_decisions(request_id,user_id,username,status,note,decided_at,effective_manager_id) VALUES(?,?,?,?,?,?,?)',(rid,u['id'],u['username'],decision_status,note,stamp,e['manager_id'] if u['role']=='manager' else None))
     decision_id=c.execute('SELECT last_insert_rowid()').fetchone()[0]
     if action=='approved' and r['type']=='unpaid_leave':
      detail=json.loads(r['details']);deductions=[]
@@ -779,6 +948,7 @@ class Handler(BaseHTTPRequestHandler):
        rate,basis=hr.daily_rate(c,e,day,sys.modules[__name__]);deductions.append({'day':day.isoformat(),'amount':round(rate,4),'basis':basis})
      detail['unpaid_salary_deductions']=deductions;c.execute('UPDATE requests SET details=? WHERE id=?',(json.dumps(detail),rid))
     for name,mime,content in decision_files:c.execute('INSERT INTO request_attachments(request_id,name,mime,content,decision_id) VALUES(?,?,?,?,?)',(rid,name,mime,content,decision_id))
+    if action=='cancelled' and r['type']=='termination':c.execute("UPDATE employees SET status='نشط' WHERE id=? AND status='فترة إشعار'",(e['id'],))
     if action=='approved' and r['type']=='termination':c.execute("UPDATE employees SET status='فترة إشعار' WHERE id=?",(e['id'],))
     if action=='approved' and r['type']=='punch_fix' and r['start_date']:
      correction=json.loads(r['details']).get('correction_type','both')
@@ -829,26 +999,41 @@ class Handler(BaseHTTPRequestHandler):
     distance=2*r*math.asin(min(1,math.sqrt(a)))
     radius=float(e['geofence_radius'] or 100)
     if distance>radius:fail('أنت خارج نطاق البصمة المسموح. المسافة التقريبية '+str(round(distance))+' متر؛ النطاق '+str(round(radius))+' متر.')
-    day=TODAY().isoformat();stamp=datetime.datetime.now().strftime('%H:%M:%S')
+    local_now=datetime.datetime.now(workforce.zone(c,e['company_id']))
+    day=local_now.date().isoformat();stamp=local_now.strftime('%H:%M:%S')
+    explicit=d.get('action')
+    if explicit not in (None,'check_in','check_out'):fail('إجراء بصمة غير صالح')
+    yesterday=(local_now.date()-datetime.timedelta(days=1)).isoformat()
+    prior=c.execute('SELECT * FROM attendance WHERE employee_id=? AND day=? AND check_out IS NULL',(e['id'],yesterday)).fetchone()
+    if prior:
+     old=json.loads(prior['schedule_snapshot']) if prior['schedule_snapshot'] else dict(e)
+     if old['work_end']<=old['work_start'] and local_now.time()<datetime.time.fromisoformat(old['work_start']):day=yesterday
+    payroll.assert_open(c,e['id'],day,day,sys.modules[__name__])
     row=c.execute('SELECT * FROM attendance WHERE employee_id=? AND day=?',(e['id'],day)).fetchone()
     if not row:
-     c.execute('INSERT INTO attendance(employee_id,day,check_in,source) VALUES(?,?,?,?)',(e['id'],day,stamp,'gps_geofence'))
+     if explicit=='check_out':fail('لا توجد بصمة حضور مفتوحة')
+     if e['work_end']<=e['work_start'] and local_now.time()<datetime.time.fromisoformat(e['work_end']):fail('الوردية الليلية السابقة بلا حضور؛ اطلب تصحيح بصمة')
+     c.execute('INSERT INTO attendance(employee_id,day,check_in,source,check_in_at,schedule_snapshot) VALUES(?,?,?,?,?,?)',(e['id'],day,stamp,'gps_geofence',now(),json.dumps(workforce.snapshot(e))))
      action='check_in';message='تم تسجيل الحضور بنجاح'
     elif not row['check_out']:
-     c.execute('UPDATE attendance SET check_out=?,source=? WHERE id=?',(stamp,'gps_geofence',row['id']))
+     if explicit=='check_in':fail('الحضور مسجل بالفعل')
+     if row['check_in_at'] and (datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(row['check_in_at'])).total_seconds()<60:fail('راجع البصمة؛ لا يمكن تسجيل انصراف خلال دقيقة من الحضور')
+     c.execute('UPDATE attendance SET check_out=?,source=?,check_out_at=? WHERE id=?',(stamp,'gps_geofence',now(),row['id']))
      action='check_out';message='تم تسجيل الانصراف بنجاح'
     else:fail('تم تسجيل الحضور والانصراف لهذا اليوم بالفعل')
     record(c,u,action,'attendance',e['id'],'distance_m='+str(round(distance,1))+'; accuracy_m='+str(round(accuracy,1)))
     c.commit();return self.write({'ok':True,'action':action,'message':message,'distance_m':round(distance,1),'radius_m':radius,'time':stamp})
    if path=='/api/archive/history' and method=='GET':
     if u['role']!='admin':fail('غير مصرح',403)
-    rows=c.execute("SELECT a.username,COALESCE(NULLIF(u.display_name,''),a.username) display_name,a.action,a.entity,a.entity_id,a.timestamp FROM audit a LEFT JOIN users u ON u.id=a.user_id WHERE a.action IN ('archive','restore') ORDER BY a.id DESC LIMIT 100").fetchall()
+    scope=permissions.scope_company(c,u)
+    rows=c.execute("SELECT a.username,COALESCE(NULLIF(u.display_name,''),a.username) display_name,a.action,a.entity,a.entity_id,a.timestamp FROM audit a LEFT JOIN users u ON u.id=a.user_id WHERE a.action IN ('archive','restore') AND (? IS NULL OR a.company_id=?) ORDER BY a.id DESC LIMIT 100",(scope,scope)).fetchall()
     return self.write([dict(row) for row in rows])
    if path=='/api/archive' and method=='POST':
     if u['role']!='admin':fail('غير مصرح',403)
     d=self.input();target=d.get('target');eid=int(d.get('id',0));value=int(bool(d.get('archived')))
     if d.get('confirm') is not True or not d.get('password'):fail('التأكيد وكلمة المرور مطلوبان')
     full=c.execute('SELECT password_hash FROM users WHERE id=?',(u['id'],)).fetchone()
+    security.attempt(c,u['username'],security.peer(self),sys.modules[__name__])
     if not verifypw(d['password'],full['password_hash']):fail('كلمة المرور غير صحيحة',403)
     table={'company':'companies','employee':'employees'}.get(target)
     if not table:fail('النوع غير صحيح')
@@ -857,8 +1042,18 @@ class Handler(BaseHTTPRequestHandler):
     record(c,u,'archive' if value else 'restore',target,eid,'confirmed');c.commit();return self.write({'ok':True,'message':'تمت الأرشفة بنجاح' if value else 'تم الاسترجاع بنجاح'})
    if path=='/api/audit' and method=='GET':
     if u['role']!='admin':fail('غير مصرح',403)
+    filters=parse_qs(urlparse(self.path).query);where=[];params=[]
+    for key,column in [('action','a.action'),('entity','a.entity')]:
+     if filters.get(key):where.append(column+'=?');params.append(filters[key][0])
+    if filters.get('from'):where.append('substr(a.timestamp,1,10)>=?');params.append(normalize_date(filters['from'][0]))
+    if filters.get('to'):where.append('substr(a.timestamp,1,10)<=?');params.append(normalize_date(filters['to'][0]))
+    scope=permissions.scope_company(c,u)
+    if scope is not None:
+     where.append('a.company_id=?');params.append(scope)
+    limit=max(1,min(200,int(filters.get('limit',[200])[0])));offset=max(0,int(filters.get('offset',[0])[0]))
+    query='SELECT a.*,u.display_name current_name,u.role current_role FROM audit a LEFT JOIN users u ON u.id=a.user_id'+(' WHERE '+' AND '.join(where) if where else '')+' ORDER BY a.id DESC LIMIT ? OFFSET ?'
     rows=[]
-    for item in c.execute('SELECT a.*,u.display_name current_name,u.role current_role FROM audit a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 200'):
+    for item in c.execute(query,params+[limit,offset]):
      row=dict(item)
      try:
       detail=json.loads(row['info'])
@@ -869,7 +1064,8 @@ class Handler(BaseHTTPRequestHandler):
     return self.write(rows)
    if path=='/api/report.csv' and method=='GET':
     rows=visible_employees(c,u);output=io.StringIO();w=csv.writer(output);w.writerow(['Company ID','Employee ID','Name','Employee No','Department','Status','Gross Salary'])
-    for e in rows:w.writerow([e['company_id'],e['id'],e['name'],e['employee_no'],e['department'],e['status'],e['gross_salary']])
+    for e in rows:w.writerow([hr.safe_cell(v) for v in [e['company_id'],e['id'],e['name'],e['employee_no'],e['department'],e['status'],e.get('gross_salary','محجوب')]])
+    record(c,u,'report_export','user',u['id'],{'format':'csv','type':'employees'});c.commit()
     data='\ufeff'+output.getvalue();return self.write(data,ctype='text/csv',headers={'Content-Disposition':'attachment; filename="employees.csv"'})
    fail('المسار غير موجود',404)
   except AppError as x:self.write({'error':x.msg},x.status)
@@ -878,7 +1074,19 @@ class Handler(BaseHTTPRequestHandler):
    print('Server error:',repr(x));self.write({'error':'خطأ داخلي؛ راجع مخرجات الخادم'},500)
   finally:c.close()
 
+class ProductionHTTPServer(ThreadingHTTPServer):
+ daemon_threads=True
+ request_queue_size=64
+ slots=threading.BoundedSemaphore(32)
+ def process_request(self,request,client_address):
+  if not self.slots.acquire(blocking=False):request.close();return
+  try:super().process_request(request,client_address)
+  except Exception:self.slots.release();raise
+ def process_request_thread(self,request,client_address):
+  try:super().process_request_thread(request,client_address)
+  finally:self.slots.release()
+
 if __name__=='__main__':
  validate_runtime_database();init();port=int(os.environ.get('PORT','8765'))
  print(f'EHKAM working local server: http://127.0.0.1:{port}');# Never print credentials into public hosting logs
- ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()
+ ProductionHTTPServer(('0.0.0.0',port),Handler).serve_forever()

@@ -106,3 +106,7 @@
  .login-card{padding:24px 18px}.login-card h1{font-size:24px}
 }
 @media(min-width:661px){.nav-backdrop{display:none!important}}
+
+.operation-row{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid #ddd}.operation-row>span{flex:1 1 250px;overflow-wrap:anywhere}.operation-row button{min-height:44px}code{overflow-wrap:anywhere;white-space:pre-wrap}button:disabled{opacity:.65;cursor:wait}
+
+@media print{.table-pagination{display:none!important}}

@@ -5,7 +5,7 @@ const {chromium}=require('playwright');
 const assert=require('node:assert/strict');
 (async()=>{
  const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
- const context=await browser.newContext({geolocation:{latitude:30.1390381,longitude:31.2558794,accuracy:10},permissions:['geolocation']});
+ const context=await browser.newContext({geolocation:{latitude:24.7136,longitude:46.6753,accuracy:10},permissions:['geolocation']});
  const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
  const url=process.env.EHKAM_TEST_URL||'http://127.0.0.1:8876';
  async function login(role,password){await page.goto(url);await page.locator(`[name=account_role][value=${role}]`).check();await page.locator('[name=username]').fill(role);await page.locator('[name=password]').fill(password);await page.locator('#loginForm button[type=submit]').click();await page.locator('#shell').waitFor({state:'visible'});await page.locator('#nav button').first().waitFor();}

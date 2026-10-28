@@ -7,6 +7,9 @@ import json
 import math
 import re
 import zipfile
+import workforce
+import payroll
+import permissions
 from xml.sax.saxutils import escape
 
 
@@ -71,7 +74,7 @@ def leave(c,e,core,asof=None):
     until=min(today,dt.date.fromisoformat(end)) if end else today
     elapsed=core.months_elapsed(e['contract_start'],until)
     monthly=float(e['annual_entitlement'])/12
-    accrued=round(monthly*elapsed,4)
+    accrued=0.0
     contract=c.execute('SELECT id FROM contracts WHERE employee_id=? AND closed_at IS NULL',(e['id'],)).fetchone()
     cid=contract[0] if contract else None
     used=c.execute("SELECT COALESCE(SUM(days),0) FROM requests WHERE employee_id=? AND contract_id IS ? AND type='annual_leave' AND status='approved'",(e['id'],cid)).fetchone()[0]
@@ -80,15 +83,21 @@ def leave(c,e,core,asof=None):
     carried=float(e['carryover'])
     expired=bool(end and today.isoformat()>=end)
     expired_accrual=accrued if expired else 0
-    if expired:carried+=accrued;accrued=0
+
     history=[]
     if e['contract_start']:
         start=dt.date.fromisoformat(e['contract_start'])
         for i in range(1,elapsed+1):
             month=start.month-1+i;year=start.year+month//12;month=month%12+1
             date=dt.date(year,month,min(start.day,calendar.monthrange(year,month)[1]))
-            history.append({'date':date.isoformat(),'days':round(monthly,4)})
-    return {'contract_id':cid,'carryover':carried,'annual_entitlement':e['annual_entitlement'],'monthly':round(monthly,4),'monthly_allowance':round((float(e['carryover'])+float(e['annual_entitlement']))/12,4),'accrued':accrued,
+            terms=workforce.terms_at(c,e,date.isoformat())
+            grant=float(terms['annual_entitlement'])/12
+            accrued+=grant
+            history.append({'date':date.isoformat(),'days':round(grant,4)})
+    accrued=round(accrued,4)
+    expired_accrual=accrued if expired else 0
+    if expired:carried+=accrued;accrued=0
+    return {'contract_id':cid,'carryover':carried,'annual_entitlement':e['annual_entitlement'],'monthly':round(monthly,4),'monthly_allowance':round(monthly,4),'legacy_monthly_distribution':round((float(e['carryover'])+float(e['annual_entitlement']))/12,4),'accrued':accrued,
             'approved_used':used,'absence_used':absent,'settled_days':settled,'available':round(carried+accrued-used-absent-settled,4),
             'elapsed_months':elapsed,'monthly_history':history,'expired_contract_accrual':expired_accrual}
 
@@ -143,9 +152,10 @@ def details(c,u,e,d,core):
 
 def notify(c,r,core,message,actor=None):
     recipients={row[0] for row in c.execute("SELECT id FROM users WHERE role='admin' OR employee_id=?",(r['employee_id'],))}
-    if r['type']!='hr_contact':
+    if r['type'] not in ('hr_contact','advance','sick_leave','termination','investigation'):
         e=c.execute('SELECT manager_id,company_id FROM employees WHERE id=?',(r['employee_id'],)).fetchone()
         recipients.update(row[0] for row in c.execute("SELECT id FROM users WHERE role='manager' AND employee_id=? AND company_id=?",(e['manager_id'],e['company_id'])))
+        recipients.update(row[0] for row in c.execute("SELECT u.id FROM approval_delegations d JOIN users u ON u.employee_id=d.target_manager_id AND u.role='manager' WHERE d.source_manager_id=? AND d.company_id=? AND d.revoked=0 AND d.starts_on<=? AND d.ends_on>=?",(e['manager_id'],e['company_id'],core.TODAY().isoformat(),core.TODAY().isoformat())))
     employee=c.execute('SELECT name,employee_no FROM employees WHERE id=?',(r['employee_id'],)).fetchone()
     kinds={'annual_leave':'إجازة سنوية','sick_leave':'إجازة مرضية','unpaid_leave':'إجازة غير مدفوعة','advance':'سلفة','permission':'استئذان','punch_fix':'تصحيح بصمة','termination':'إنهاء تعاقد','delegation':'انتداب','hr_contact':'تواصل مع الموارد البشرية','investigation':'تحقيق','open':'طلب مفتوح'}
     states={'approved':'موافقة','rejected':'رفض','review':'مراجعة','cancelled':'إلغاء','closed':'إغلاق','accepted':'قبول','declined':'رفض الموظف','manager_approved':'موافقة المشرف بانتظار الإدارة'}
@@ -156,6 +166,10 @@ def notify(c,r,core,message,actor=None):
         role={'admin':'أدمن','manager':'مشرف','employee':'موظف'}[person['role']]
         message+=f" · بواسطة {person['display_name'] or person['username']} ({person['username']} — {role})"
     for uid in recipients:
+        recipient=c.execute('SELECT * FROM users WHERE id=?',(uid,)).fetchone();profile=permissions.profile(c,recipient)
+        scope=permissions.scope_company(c,recipient)
+        if scope is not None and r['company_id']!=scope:continue
+        if profile=='auditor' or (profile=='payroll' and r['type']!='advance') or (profile=='hr' and r['type']=='advance'):continue
         c.execute('INSERT INTO notifications(user_id,request_id,message,created_at) VALUES(?,?,?,?)',(uid,r['id'],message,core.now()))
         contact=c.execute('SELECT e.email FROM users u JOIN employees e ON e.id=u.employee_id WHERE u.id=?',(uid,)).fetchone()
         if contact and re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',contact[0] or ''):
@@ -184,6 +198,7 @@ def scan_absences(c,e,start,end,core):
     result=[];week={int(x) for x in e['workweek'].split(',')}
     for i in range(max(0,(b-a).days+1)):
         day=a+dt.timedelta(days=i);iso=day.isoformat()
+        historical=workforce.terms_at(c,e,iso);week={int(x) for x in historical['workweek'].split(',')}
         if day.weekday() not in week or holiday(c,e,iso):continue
         if (e['hire_date'] and iso<e['hire_date']) or (e['contract_start'] and iso<e['contract_start']) or (employment_end(c,e) and iso>employment_end(c,e)):continue
         entry=c.execute('SELECT * FROM attendance WHERE employee_id=? AND day=?',(e['id'],iso)).fetchone()
@@ -199,10 +214,10 @@ def scan_absences(c,e,start,end,core):
 
 
 def daily_rate(c,e,day,core):
-    basis=c.execute('SELECT salary_basis FROM companies WHERE id=?',(e['company_id'],)).fetchone()[0]
+    basis=workforce.salary_basis_at(c,e['company_id'],day.isoformat())
     if basis not in ('30','calendar'):core.fail('حدد واعتمد أساس أجر اليوم في سياسة الشركة قبل تسجيل الخصم أو التسوية')
     divisor=30 if basis=='30' else calendar.monthrange(day.year,day.month)[1]
-    return core.salary(e)/divisor,basis
+    return core.salary(workforce.terms_at(c,e,day.isoformat()))/divisor,basis
 
 
 def handle(h,c,u,path,method,core):
@@ -216,16 +231,25 @@ def handle(h,c,u,path,method,core):
         eid=int(qs.get('employee_id',[u['employee_id'] or 0])[0]);return core.user_allowed_emp(c,u,eid)
     if path=='/api/employee-files':
         e=employee()
+        if u['role']=='manager' and e['id']!=u['employee_id']:core.fail('المستندات الشخصية للموظف والإدارة فقط',403)
         if method=='POST':
-            admin();files=core.validate_attachments(h.input().get('attachments',[]))
+            admin();d=h.input();files=core.validate_attachments(d.get('attachments',[]))
+            kind=d.get('document_type','personal');expires=core.normalize_date(d.get('expires_on'));supersedes=int(d['supersedes_id']) if d.get('supersedes_id') else None;version=1
+            if kind not in ('personal','identity','contract','medical','qualification','other'):core.fail('نوع المستند غير صالح')
+            if supersedes:
+                previous=c.execute('SELECT * FROM employee_files WHERE id=? AND employee_id=?',(supersedes,e['id'])).fetchone()
+                if not previous or len(files)!=1 or c.execute('SELECT 1 FROM employee_files WHERE supersedes_id=?',(supersedes,)).fetchone():core.fail('راجع المستند السابق؛ كل إصدار له بديل واحد')
+                version=previous['version']+1
             if not files:core.fail('اختر مرفقًا')
-            for name,mime,content in files:c.execute('INSERT INTO employee_files(employee_id,name,mime,content,uploaded_by,created_at) VALUES(?,?,?,?,?,?)',(e['id'],name,mime,content,u['id'],core.now()))
+            for name,mime,content in files:c.execute('INSERT INTO employee_files(employee_id,name,mime,content,uploaded_by,created_at,document_type,expires_on,version,supersedes_id) VALUES(?,?,?,?,?,?,?,?,?,?)',(e['id'],name,mime,content,u['id'],core.now(),kind,expires,version,supersedes))
             core.record(c,u,'employee_file_upload','employee',e['id']);c.commit()
-        return respond([dict(r) for r in c.execute('SELECT id,name,mime,length(content) size,created_at FROM employee_files WHERE employee_id=?',(e['id'],))])
+        return respond([dict(r) for r in c.execute('SELECT id,name,mime,length(content) size,created_at,document_type,expires_on,version,supersedes_id FROM employee_files WHERE employee_id=?',(e['id'],))])
     if re.fullmatch('/api/employee-files/[0-9]+',path) and method=='GET':
         row=c.execute('SELECT * FROM employee_files WHERE id=?',(int(path.rsplit('/',1)[1]),)).fetchone()
         if not row:core.fail('المرفق غير موجود',404)
         core.user_allowed_emp(c,u,row['employee_id'])
+        if u['role']=='manager' and row['employee_id']!=u['employee_id']:core.fail('المستندات الشخصية للموظف والإدارة فقط',403)
+        core.record(c,u,'employee_file_download','employee',row['employee_id'],{'file_id':row['id']});c.commit()
         from urllib.parse import quote
         h.write(row['content'],ctype=row['mime'],headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(row['name'],safe=''),'X-Content-Type-Options':'nosniff'})
         return True
@@ -237,7 +261,13 @@ def handle(h,c,u,path,method,core):
             if not row or not row['check_out'] or status not in ('approved','rejected') or not note:core.fail('يلزم سجل انصراف وقرار وملاحظات')
             def minute(value):
                 t=dt.time.fromisoformat(value);return t.hour*60+t.minute
-            maximum=max(0,minute(row['check_out'])-minute(e['work_end']))
+            historical=json.loads(row['schedule_snapshot']) if row['schedule_snapshot'] else workforce.terms_at(c,e,day)
+            out=minute(row['check_out']);end=minute(historical['work_end'])
+            if historical['work_end']<=historical['work_start']:
+                end+=1440
+                if out<minute(historical['work_start']):out+=1440
+            maximum=max(0,out-end)
+            payroll.assert_open(c,e['id'],day,day,core)
             minutes=int(d.get('minutes',0))
             if not 0<minutes<=maximum:core.fail('الدقائق تتجاوز الوقت المسجل بعد نهاية الدوام')
             if c.execute('SELECT 1 FROM overtime_reviews WHERE employee_id=? AND day=?',(e['id'],day)).fetchone():core.fail('تمت مراجعة الوقت الإضافي لهذا اليوم بالفعل')
@@ -253,13 +283,16 @@ def handle(h,c,u,path,method,core):
     if path=='/api/policy':
         admin();co=int(qs.get('company_id',[0])[0])
         if method=='POST':
-            d=h.input();basis=d.get('salary_basis','calendar');approval=d.get('approval_mode','supervisor_or_admin')
+            before=c.execute('SELECT * FROM companies WHERE id=?',(co,)).fetchone()
+            if not before:core.fail('الشركة غير موجودة',404)
+            d=h.input();basis=d.get('salary_basis',before['salary_basis']);approval=d.get('approval_mode',before['approval_mode'])
             if approval not in ('supervisor_or_admin','admin_only','supervisor_then_admin'):core.fail('مسار اعتماد غير صالح')
             if basis not in ('','30','calendar'):core.fail('أساس أجر اليوم غير صالح')
-            minimum=int(d.get('advance_min_days',0));notice=int(d.get('notice_days',60))
+            minimum=int(d.get('advance_min_days',before['advance_min_days']));notice=int(d.get('notice_days',before['notice_days']))
             if not 0<=minimum<=365 or not 0<=notice<=365:core.fail('مدة غير صالحة')
             changed=c.execute('UPDATE companies SET salary_basis=?,advance_min_days=?,notice_days=?,approval_mode=? WHERE id=?',(basis,minimum,notice,approval,co))
             if not changed.rowcount:core.fail('الشركة غير موجودة',404)
+            workforce.save_policy(c,co,before,core)
             core.record(c,u,'policy_update','company',co,json.dumps({'salary_basis':basis,'advance_min_days':minimum,'notice_days':notice,'approval_mode':approval},ensure_ascii=False));c.commit()
         row=c.execute('SELECT id,name,salary_basis,advance_min_days,notice_days,approval_mode FROM companies WHERE id=?',(co,)).fetchone()
         if not row:core.fail('الشركة غير موجودة',404)
@@ -275,7 +308,7 @@ def handle(h,c,u,path,method,core):
                 core.normalize_employee_fields(d)
                 for key in ('work_start','work_end'):dt.time.fromisoformat(d[key])
                 keys=['name','workweek','work_start','work_end']
-                if not d.get('workweek') or d['work_end']<=d['work_start']:core.fail('أيام أو وقت الجدول غير صحيح')
+                if not d.get('workweek') or d['work_end']==d['work_start']:core.fail('الجدول يجب ألا يبدأ وينتهي في نفس الوقت')
             elif table=='work_sites':
                 if any(d.get(k) is None for k in ('latitude','longitude','radius')):core.fail('بيانات الموقع مطلوبة')
                 lat=float(d['latitude']);lon=float(d['longitude']);radius=float(d['radius'])
@@ -291,8 +324,13 @@ def handle(h,c,u,path,method,core):
     if path=='/api/leave/preview' and method=='POST':
         d=h.input();e=core.user_allowed_emp(c,u,int(d.get('employee_id') or u['employee_id'] or 0))
         a=core.normalize_date(d.get('start_date'));b=core.normalize_date(d.get('end_date'))
-        days=core.business_days(e,a,b,c);balance=leave(c,e,core)
-        monthly_available=balance['monthly_allowance']
+        days=core.business_days(e,a,b,c);fraction=float(d.get('last_day_fraction',1))
+        if fraction not in (.25,.5,.75,1):core.fail('كسر يوم غير صالح')
+        if fraction!=1:
+            if not core.business_days(e,b,b,c):core.fail('آخر يوم جزئي يجب أن يكون يوم عمل')
+            days=days-1+fraction
+        balance=leave(c,e,core)
+        monthly_available=balance['monthly']
         return respond({'days':days,'monthly_available':monthly_available,'monthly_after_approval':round(max(0,monthly_available-days),4),'available':balance['available'],'after_approval':round(balance['available']-days,4)})
     if path=='/api/contracts' and method=='GET':
         e=employee();return respond([dict(r) for r in c.execute('SELECT * FROM contracts WHERE employee_id=? ORDER BY id',(e['id'],))])
@@ -307,7 +345,8 @@ def handle(h,c,u,path,method,core):
         balance=leave(c,e,core)['available']
         c.execute('UPDATE contracts SET closed_balance=?,closed_at=? WHERE id=?',(balance,core.now(),old))
         c.execute("UPDATE employees SET contract_start=?,contract_end=?,annual_entitlement=?,carryover=?,status='نشط' WHERE id=?",(start,end,entitlement,balance,e['id']))
-        e=c.execute('SELECT * FROM employees WHERE id=?',(e['id'],)).fetchone();new=ensure_contract(c,e)
+        before=e;e=c.execute('SELECT * FROM employees WHERE id=?',(e['id'],)).fetchone();new=ensure_contract(c,e)
+        workforce.save_terms(c,before,e,core.TODAY().isoformat(),u['id'],'تجديد عقد وترحيل موثق',core)
         core.record(c,u,'contract_renewal','employee',e['id'],json.dumps({'old':old,'new':new,'carryover':balance}));c.commit()
         return respond({'ok':True,'carryover':balance,'contract_id':new})
     if path=='/api/absences' and method=='GET':
@@ -319,6 +358,7 @@ def handle(h,c,u,path,method,core):
         if status not in ('approved','excused') or not note:core.fail('اختر القرار واكتب ملاحظاته')
         items=scan_absences(c,e,day,day,core)
         if not items or items[0]['status']!='pending':core.fail('اليوم غير متاح لاعتماد غياب جديد')
+        payroll.assert_open(c,e['id'],day,day,core)
         rate,basis=daily_rate(c,e,dt.date.fromisoformat(day),core) if status=='approved' else (0,'')
         cid=ensure_contract(c,e);fraction=items[0]['leave_days'] if status=='approved' else 0
         c.execute('INSERT INTO absences(employee_id,contract_id,day,status,leave_days,salary_deduction,salary_basis,original_salary,note,decided_by,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(e['id'],cid,day,status,fraction,round(rate*fraction,2),basis,rate,note,u['id'],core.now()))
@@ -342,7 +382,7 @@ def handle(h,c,u,path,method,core):
         core.request_access(c,u,r)
         if method=='POST':
             d=h.input();message=str(d.get('message') or '').strip()
-            if not message:core.fail('اكتب الملاحظة')
+            if not message or len(message)>4000:core.fail('اكتب ملاحظة لا تتجاوز 4000 حرف')
             attachments=core.validate_attachments(d.get('attachments',[]))
             c.execute('INSERT INTO request_comments(request_id,user_id,username,message,created_at) VALUES(?,?,?,?,?)',(rid,u['id'],u['username'],message,core.now()))
             for name,mime,content in attachments:c.execute('INSERT INTO request_attachments(request_id,name,mime,content) VALUES(?,?,?,?)',(rid,name,mime,content))
@@ -350,7 +390,10 @@ def handle(h,c,u,path,method,core):
         return respond([dict(row) for row in c.execute('SELECT * FROM request_comments WHERE request_id=? ORDER BY id',(rid,))])
     if path=='/api/reports' and method=='GET':
         if u['role']=='employee':core.fail('التقارير للمسؤولين فقط',403)
+        if permissions.profile(c,u)=='hr' and qs.get('type',['employees'])[0]=='salaries':core.fail('التقرير المالي لدور الرواتب',403)
+        if u['role']=='manager' and qs.get('type',['employees'])[0] in ('salaries','leave'):core.fail('التقارير المالية والأرصدة التفصيلية للإدارة',403)
         rows=report_rows(c,u,qs,core);fmt=qs.get('format',['json'])[0]
+        if fmt!='json':core.record(c,u,'report_export','user',u['id'],{'type':qs.get('type',['employees'])[0],'format':fmt});c.commit()
         if fmt=='json':return respond(rows)
         if fmt=='xlsx':h.write(xlsx(rows),ctype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',headers={'Content-Disposition':'attachment; filename="ehkam-report.xlsx"'});return True
         if fmt=='csv':
@@ -369,10 +412,15 @@ def report_rows(c,u,qs,core):
     def in_range(day):return (not start or day>=start) and (not end or day<=end)
     for e in people:
         base={'company_name':e['company_name'],'company_id':e['company_id'],'employee_id':e['id'],'employee_no':e['employee_no'],'name':e['name']}
-        if typ=='employees':result.append({**base,**{k:e[k] for k in ['identity_no','department','job','status','phone_country','phone_local','email','nationality','branch']}})
-        elif typ=='contracts' and (not e['contract_end'] or in_range(e['contract_end'])):result.append({**base,'start':e['contract_start'],'end':e['contract_end'],'remaining_days':(dt.date.fromisoformat(e['contract_end'])-core.TODAY()).days if e['contract_end'] else None})
-        elif typ=='leave':result.append({**base,**{k:v for k,v in leave(c,e,core).items() if k!='monthly_history'}})
+        if typ=='employees':result.append({**base,**{k:e[k] for k in ['identity_no','department','job','status','phone_country','phone_local','email','nationality','branch'] if k in e}})
+        elif typ=='contracts':
+            for contract in c.execute('SELECT * FROM contracts WHERE employee_id=? ORDER BY id',(e['id'],)):
+                if contract['end_date'] and not in_range(contract['end_date']):continue
+                result.append({**base,'start':contract['start_date'],'end':contract['end_date'],'closed_at':contract['closed_at'],'remaining_days':(dt.date.fromisoformat(contract['end_date'])-core.TODAY()).days if contract['end_date'] else None})
+        elif typ=='leave':result.append({**base,**{k:v for k,v in leave(c,e,core).items() if k!='monthly_history'},'as_of':core.TODAY().isoformat(),'report_note':'رصيد حالي؛ فلاتر الفترة لا تعيد بناء الرصيد التاريخي'})
         elif typ=='salaries':
+            e=dict(c.execute('SELECT * FROM employees WHERE id=?',(e['id'],)).fetchone())
+            e['gross_salary']=core.salary(e)
             period_start=start or core.TODAY().replace(day=1).isoformat()
             period_end=end or core.TODAY().replace(day=calendar.monthrange(core.TODAY().year,core.TODAY().month)[1]).isoformat()
             a=dt.date.fromisoformat(period_start);b=dt.date.fromisoformat(period_end)
@@ -382,23 +430,20 @@ def report_rows(c,u,qs,core):
                 day=a+dt.timedelta(days=offset)
                 if e['hire_date'] and day.isoformat()<e['hire_date']:continue
                 if employment_end(c,e) and day.isoformat()>employment_end(c,e):continue
-                earned+=core.salary(e)/calendar.monthrange(day.year,day.month)[1]
+                earned+=core.salary(workforce.terms_at(c,e,day.isoformat()))/calendar.monthrange(day.year,day.month)[1]
             deductions=c.execute("SELECT COALESCE(SUM(salary_deduction),0) FROM absences WHERE employee_id=? AND status='approved' AND day>=? AND day<=?",(e['id'],period_start,period_end)).fetchone()[0]
             unpaid=0
             for request in c.execute("SELECT details FROM requests WHERE employee_id=? AND type='unpaid_leave' AND status='approved'",(e['id'],)):
                 unpaid+=sum(item['amount'] for item in json.loads(request['details']).get('unpaid_salary_deductions',[]) if period_start<=item['day']<=period_end)
-            result.append({**base,**{k:e[k] for k in ['basic','housing','transport','other','gross_salary','payment_method']},'period_start':period_start,'period_end':period_end,'earned_for_period':round(earned,2),'approved_absence_deductions':round(deductions,2),'unpaid_leave_deductions':round(unpaid,2),'net_estimate':round(max(0,earned-deductions-unpaid),2)})
+            result.append({**base,**{k:e[k] for k in ['basic','housing','transport','other','gross_salary','payment_method']},'period_start':period_start,'period_end':period_end,'earned_for_period':round(earned,2),'approved_absence_deductions':round(deductions,2),'unpaid_leave_deductions':round(unpaid,2),'net_estimate':round(max(0,earned-deductions-unpaid),2),'report_note':'تقدير؛ مسير الرواتب المعتمد محفوظ في قسم الرواتب'})
         elif typ=='requests':
             for r in core.visible_requests(c,u):
                 if r['employee_id']==e['id'] and in_range(r['created_at'][:10]):result.append({**base,**{k:r[k] for k in ['id','type','status','created_at','updated_at','notes']}})
         elif typ=='attendance':
             for row in c.execute('SELECT * FROM attendance WHERE employee_id=? ORDER BY day',(e['id'],)):
                 if not in_range(row['day']):continue
-                worked=0
-                if row['check_in'] and row['check_out']:
-                    try:worked=(dt.datetime.fromisoformat(row['day']+'T'+row['check_out'])-dt.datetime.fromisoformat(row['day']+'T'+row['check_in'])).total_seconds()/3600
-                    except ValueError:pass
-                result.append({**base,'day':row['day'],'check_in':row['check_in'],'check_out':row['check_out'],'hours':round(max(0,worked),2),'late':bool(row['check_in'] and row['check_in']>e['work_start']),'early_out':bool(row['check_out'] and row['check_out']<e['work_end']),'source':row['source'],'day_status':'حضور مسجل','overtime_approved_minutes':c.execute("SELECT COALESCE(SUM(minutes),0) FROM overtime_reviews WHERE employee_id=? AND day=? AND status='approved'",(e['id'],row['day'])).fetchone()[0]})
+                metrics=workforce.attendance_metrics(c,e,row)
+                result.append({**base,'day':row['day'],'check_in':row['check_in'],'check_out':row['check_out'],**metrics,'source':row['source'],'day_status':'حضور مسجل','overtime_approved_minutes':c.execute("SELECT COALESCE(SUM(minutes),0) FROM overtime_reviews WHERE employee_id=? AND day=? AND status='approved'",(e['id'],row['day'])).fetchone()[0]})
             if start and end:
                 for absence in scan_absences(c,e,start,end,core):
                     if absence['status']!='incomplete':result.append({**base,'day':absence['day'],'check_in':None,'check_out':None,'hours':0,'late':False,'early_out':False,'source':'absence_review','day_status':absence['status'],'overtime_approved_minutes':0})

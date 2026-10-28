@@ -21,7 +21,7 @@ ACCOUNTS = [
 
 def seed_fixture(c):
  """Public test-only fixture; never invoked by normal production startup."""
- c.execute('INSERT INTO companies(name,name_en,contract_end,city,address,latitude,longitude,geofence_radius) VALUES(?,?,?,?,?,?,?,?)',('شركة الأفق','Al Ofoq Co','2027-12-31','الرياض','موقع تجريبي',30.1390381,31.2558794,100))
+ c.execute('INSERT INTO companies(name,name_en,contract_end,city,address,latitude,longitude,geofence_radius) VALUES(?,?,?,?,?,?,?,?)',('شركة الأفق','Al Ofoq Co','2027-12-31','الرياض','موقع تجريبي',24.7136,46.6753,100))
  co=c.execute('SELECT last_insert_rowid()').fetchone()[0]
  staff=[('أحمد محمد','Ahmed Mohammed','A-001','مدير موارد بشرية','الموارد البشرية',None,5200,1000,400,0,'2026-01-01','2027-01-01',0),('سارة خالد','Sara Khalid','A-002','أخصائي موارد بشرية','الموارد البشرية',1,4000,0,0,25,'2026-01-01','2027-01-01',0),('خالد علي','Khalid Ali','A-003','محاسب','المالية',1,3500,800,200,8,'2026-05-01','2027-05-01',0)]
  for name,en,no,job,dep,manager,basic,housing,trans,carry,start,end,arch in staff:
