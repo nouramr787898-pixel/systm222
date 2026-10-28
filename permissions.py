@@ -21,6 +21,7 @@ def profile(c,u):
 def guard(h,c,u,path,method,core):
     scope_request(h,c,u,path,method,core)
     role=profile(c,u)
+    if path=='/api/assistant' and method in ('GET','POST'):return
     if role in ('owner','manager','employee'):return
     if role=='hr' and path in ('/api/supervisor-candidates','/api/supervisor-accounts','/api/action-items','/api/attendance-calendar'):return
     if path=='/api/action-items' and method=='GET':return
