@@ -25,6 +25,7 @@ def guard(h,c,u,path,method,core):
     if role in ('owner','manager','employee'):return
     if role=='hr' and path in ('/api/supervisor-candidates','/api/supervisor-accounts','/api/action-items','/api/attendance-calendar'):return
     if path=='/api/action-items' and method=='GET':return
+    if path.startswith('/api/attachments/') and method=='GET':return # request_access checks company, role and sensitive request type
     if path in ('/api/me','/api/logout') or path.startswith('/api/security/'):return
     if role=='auditor':
         if method!='GET' or not (path in ('/api/email-outbox','/api/delegations','/api/attachments','/api/employees','/api/companies','/api/requests','/api/dashboard','/api/audit','/api/payroll','/api/loans','/api/pay-adjustments','/api/reports','/api/notifications','/api/notifications/unread') or path.startswith('/api/payroll/')):core.fail('حساب المراجع للقراءة فقط',403)
