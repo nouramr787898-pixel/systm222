@@ -217,7 +217,7 @@ class ProfessionalTests(unittest.TestCase):
         status,data=self.employee('employment-letter',binary=True);self.assertEqual(status,200);self.assertIn('مسودة'.encode(),data)
         self.create();self.assertGreater(self.employee('notifications/unread')[1]['count'],0)
         self.employee('notifications/read',{})
-        self.assertEqual(self.employee('notifications/unread')[1]['count'],0)
+        self.assertEqual(self.employee('notifications/unread')[1]['count'],len(self.employee('action-items')[1]))
 
     def test_policy_history_preserves_old_daily_wage_basis(self):
         self.admin('policy?company_id=1',{'salary_basis':'30','approval_mode':'admin_only'})

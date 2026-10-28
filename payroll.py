@@ -69,39 +69,49 @@ def assert_open(c,eid,start,end,core):
         core.fail('الفترة لها مسير رواتب معتمد؛ استخدم تسوية في فترة مفتوحة',409)
 
 
-def calculate(c,e,month,core):
+def calculate(c,e,month,core,company_id=None):
     first,last=bounds(month);earned=Decimal('0');schedules=set()
     end=core.hr.employment_end(c,e)
+    belongs=lambda day: company_id is None or workforce.terms_at(c,e,str(day))['company_id']==company_id
     for n in range((last-first).days+1):
         day=first+dt.timedelta(days=n);terms=workforce.terms_at(c,e,day.isoformat())
+        if not belongs(day):continue
         if terms['hire_date'] and day.isoformat()<terms['hire_date']:continue
         if end and day.isoformat()>end:continue
         gross=sum(Decimal(str(terms[k] or 0)) for k in ('basic','housing','transport','other'))
         earned+=gross/Decimal(calendar.monthrange(day.year,day.month)[1])
         schedules.add((terms['workweek'],terms['work_start'],terms['work_end']))
     earned_cents=cents(earned)
-    absence=sum(cents(r[0]) for r in c.execute("SELECT salary_deduction FROM absences WHERE employee_id=? AND status='approved' AND day BETWEEN ? AND ?",(e['id'],str(first),str(last))))
+    absence=sum(cents(r['salary_deduction']) for r in c.execute("SELECT salary_deduction,day FROM absences WHERE employee_id=? AND status='approved' AND day BETWEEN ? AND ?",(e['id'],str(first),str(last))) if belongs(r['day']))
     unpaid=0
     for r in c.execute("SELECT details FROM requests WHERE employee_id=? AND type='unpaid_leave' AND status='approved'",(e['id'],)):
-        unpaid+=sum(cents(x['amount']) for x in json.loads(r[0]).get('unpaid_salary_deductions',[]) if str(first)<=x['day']<=str(last))
+        unpaid+=sum(cents(x['amount']) for x in json.loads(r[0]).get('unpaid_salary_deductions',[]) if str(first)<=x['day']<=str(last) and belongs(x['day']))
     additions=deductions=0;adjustments=[]
     for r in c.execute("SELECT * FROM pay_adjustments WHERE employee_id=? AND month=? AND status='approved' ORDER BY id",(e['id'],month)):
+        if not belongs(r['created_at'][:10]):continue
         adjustments.append({'id':r['id'],'kind':r['kind'],'amount_cents':r['amount_cents'],'note':r['note']})
         if r['kind'] in ('deduction','statutory'):deductions+=r['amount_cents']
         else:additions+=r['amount_cents']
     loans=[]
     for loan in c.execute('SELECT * FROM loans WHERE employee_id=? AND disbursed_on<=? ORDER BY id',(e['id'],str(last))):
+        if not belongs(loan['disbursed_on']):continue
         outstanding=remaining(c,loan)
         if outstanding>0:loans.append({'loan_id':loan['id'],'amount_cents':min(outstanding,loan['installment_cents'])})
     loan_total=sum(x['amount_cents'] for x in loans)
     net=earned_cents+additions-absence-unpaid-deductions-loan_total
     if net<0:core.fail('صافي الموظف '+e['name']+' سالب؛ راجع الاستقطاعات قبل إعداد المسير')
-    return {'employee_id':e['id'],'employee_no':e['employee_no'],'name':e['name'],'company_id':e['company_id'],'month':month,'currency':'SAR','earned_cents':earned_cents,'absence_cents':absence,'unpaid_cents':unpaid,'additions_cents':additions,'deductions_cents':deductions,'loan_cents':loan_total,'net_cents':net,'loans':loans,'adjustments':adjustments,'payment_method':e['payment_method'],'history_note':'Current values before first recorded change are a legacy baseline, not verified historical evidence.','statutory_note':'Only explicitly reviewed adjustments are included; no automatic tax, insurance or end-of-service entitlement.'}
+    return {'employee_id':e['id'],'employee_no':e['employee_no'],'name':e['name'],'company_id':company_id if company_id is not None else e['company_id'],'month':month,'currency':'SAR','earned_cents':earned_cents,'absence_cents':absence,'unpaid_cents':unpaid,'additions_cents':additions,'deductions_cents':deductions,'loan_cents':loan_total,'net_cents':net,'loans':loans,'adjustments':adjustments,'payment_method':e['payment_method'],'history_note':'Current values before first recorded change are a legacy baseline, not verified historical evidence.','statutory_note':'Only explicitly reviewed adjustments are included; no automatic tax, insurance or end-of-service entitlement.'}
 
 
 def source(c,company,month,core):
-    people=c.execute('SELECT e.* FROM employees e WHERE e.company_id=? ORDER BY e.id',(company,)).fetchall()
-    lines=[calculate(c,e,month,core) for e in people if (not e['hire_date'] or e['hire_date']<=str(bounds(month)[1])) and (not core.hr.employment_end(c,e) or core.hr.employment_end(c,e)>=str(bounds(month)[0]))]
+    people=c.execute("SELECT e.* FROM employees e WHERE e.company_id=? OR EXISTS(SELECT 1 FROM employee_terms t WHERE t.employee_id=e.id AND json_extract(t.snapshot,'$.company_id')=?) ORDER BY e.id",(company,company)).fetchall()
+    first,last=bounds(month);lines=[]
+    for e in people:
+        if e['hire_date'] and e['hire_date']>str(last):continue
+        end=core.hr.employment_end(c,e)
+        if end and end<str(first):continue
+        if not any(workforce.terms_at(c,e,str(first+dt.timedelta(days=n)))['company_id']==company for n in range((last-first).days+1)):continue
+        lines.append(calculate(c,e,month,core,company))
     if not lines:core.fail('لا يوجد موظفون مستحقون في الفترة')
     raw=json.dumps(lines,sort_keys=True,ensure_ascii=False)
     return lines,hashlib.sha256(raw.encode()).hexdigest()

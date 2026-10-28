@@ -95,7 +95,7 @@ class ProductionDatabaseTests(unittest.TestCase):
 
     def test_restart_new_code_directory_and_restore_drill(self):
         code_a=self.root/'release-a';code_b=self.root/'release-b'
-        runtime_files=['railway_start.py','server.py','permissions.py','directory_tools.py','talent.py','security.py','workforce.py','payroll.py','professional-ui.js','hr.py','gps_location.py','i18n.js','app.js','hr-ui.js','style.css','index.html','ehkam-logo-full.png']
+        runtime_files=['railway_start.py','server.py','ui_workflows.py','permissions.py','directory_tools.py','talent.py','security.py','workforce.py','payroll.py','professional-ui.js','workflow-ui.js','hr.py','gps_location.py','i18n.js','app.js','hr-ui.js','style.css','index.html','ehkam-logo-full.png']
         for directory in (code_a,code_b):
             directory.mkdir()
             for filename in runtime_files:shutil.copyfile(Path(server.__file__).parent/filename,directory/filename)

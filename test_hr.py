@@ -103,7 +103,9 @@ class HRTests(unittest.TestCase):
         self.assertEqual(code,200,schedules)
         self.assertEqual(self.admin('employees/2',{'schedule_id':schedules[0]['id']})[0],200)
         e=self.employee('employees')[1][0];self.assertEqual((e['workweek'],e['work_start']),('4','10:00'))
-        self.assertEqual(self.employee('leave/preview',{'employee_id':2,'start_date':'23/10/2026','end_date':'23/10/2026'})[1]['days'],1)
+        # The schedule changes on 27 October, not retroactively on the previous Friday.
+        self.assertEqual(self.employee('leave/preview',{'employee_id':2,'start_date':'23/10/2026','end_date':'23/10/2026'})[1]['days'],0)
+        self.assertEqual(self.employee('leave/preview',{'employee_id':2,'start_date':'30/10/2026','end_date':'30/10/2026'})[1]['days'],1)
 
     def test_site_assignment_and_cross_company_denial(self):
         code,sites=self.admin('sites?company_id=1',{'name':'موقع آخر','latitude':20,'longitude':20,'radius':100})

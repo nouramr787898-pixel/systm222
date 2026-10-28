@@ -30,6 +30,7 @@ def attempt(c, username, ip, core):
         if count > maximum:
             core.fail('محاولات دخول كثيرة؛ حاول بعد 15 دقيقة', 429)
     c.execute('DELETE FROM login_limits WHERE window_start<?', (stamp-86400,))
+    c.commit()
 
 
 def create(c, uid, agent):

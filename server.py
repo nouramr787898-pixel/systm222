@@ -1,7 +1,7 @@
 """EHKAM HR Portal - local functional prototype. Run: python server.py"""
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import hr, sys, calendar, gps_location, security, workforce, payroll, talent, directory_tools, permissions
+import hr, sys, calendar, gps_location, security, workforce, payroll, talent, directory_tools, permissions, ui_workflows
 import sqlite3, json, os, hashlib, hmac, secrets, datetime, csv, io, threading, re, time, ssl, smtplib, urllib.request, urllib.parse, urllib.error, base64, html, math
 from email.message import EmailMessage
 from http.cookies import SimpleCookie
@@ -385,7 +385,12 @@ def business_days(e,start,end,c=None):
  if b<a:fail('تاريخ النهاية قبل البداية')
  if (b-a).days>365:fail('الفترة أكبر من سنة')
  valid={int(k) for k in (e['workweek'] or '').split(',') if k.strip().isdigit()}
- return sum((a+datetime.timedelta(days=i)).weekday() in valid and (c is None or not hr.holiday(c,e,(a+datetime.timedelta(days=i)).isoformat())) for i in range((b-a).days+1))
+ total=0
+ for offset in range((b-a).days+1):
+  day=a+datetime.timedelta(days=offset);historical=workforce.terms_at(c,e,day.isoformat()) if c is not None else e
+  week={int(k) for k in historical['workweek'].split(',')}
+  if day.weekday() in week and (c is None or not hr.holiday(c,historical,day.isoformat())):total+=1
+ return total
 
 def leave(c,e):
  return hr.leave(c,e,sys.modules[__name__])
@@ -562,6 +567,7 @@ class Handler(BaseHTTPRequestHandler):
    return self.write((BASE/'index.html').read_bytes(),ctype='text/html')
   if method=='GET' and path=='/style.css':return self.write((BASE/'style.css').read_bytes(),ctype='text/css')
   if method=='GET' and path=='/i18n.js':return self.write((BASE/'i18n.js').read_bytes(),ctype='text/javascript')
+  if method=='GET' and path=='/workflow-ui.js':return self.write((BASE/'workflow-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/professional-ui.js':return self.write((BASE/'professional-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/hr-ui.js':return self.write((BASE/'hr-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/app.js':return self.write((BASE/'app.js').read_bytes(),ctype='text/javascript')
@@ -704,6 +710,7 @@ class Handler(BaseHTTPRequestHandler):
    u=self.actor(c)
    permissions.guard(self,c,u,path,method,sys.modules[__name__])
    if u['must_change_password'] and path not in ('/api/me','/api/security/password','/api/security/sessions','/api/logout'):fail('غيّر كلمة المرور المؤقتة من أمان الحساب أولًا',403)
+   if ui_workflows.handle(self,c,u,path,method,sys.modules[__name__]):return
    if directory_tools.handle(self,c,u,path,method,sys.modules[__name__]):return
    if talent.handle(self,c,u,path,method,sys.modules[__name__]):return
    if workforce.handle(self,c,u,path,method,sys.modules[__name__]):return

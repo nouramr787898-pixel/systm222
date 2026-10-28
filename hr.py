@@ -199,7 +199,7 @@ def scan_absences(c,e,start,end,core):
     for i in range(max(0,(b-a).days+1)):
         day=a+dt.timedelta(days=i);iso=day.isoformat()
         historical=workforce.terms_at(c,e,iso);week={int(x) for x in historical['workweek'].split(',')}
-        if day.weekday() not in week or holiday(c,e,iso):continue
+        if day.weekday() not in week or holiday(c,historical,iso):continue
         if (e['hire_date'] and iso<e['hire_date']) or (e['contract_start'] and iso<e['contract_start']) or (employment_end(c,e) and iso>employment_end(c,e)):continue
         entry=c.execute('SELECT * FROM attendance WHERE employee_id=? AND day=?',(e['id'],iso)).fetchone()
         approved=coverage(c,e['id'],iso)
@@ -214,10 +214,11 @@ def scan_absences(c,e,start,end,core):
 
 
 def daily_rate(c,e,day,core):
-    basis=workforce.salary_basis_at(c,e['company_id'],day.isoformat())
+    historical=workforce.terms_at(c,e,day.isoformat())
+    basis=workforce.salary_basis_at(c,historical['company_id'],day.isoformat())
     if basis not in ('30','calendar'):core.fail('حدد واعتمد أساس أجر اليوم في سياسة الشركة قبل تسجيل الخصم أو التسوية')
     divisor=30 if basis=='30' else calendar.monthrange(day.year,day.month)[1]
-    return core.salary(workforce.terms_at(c,e,day.isoformat()))/divisor,basis
+    return core.salary(historical)/divisor,basis
 
 
 def handle(h,c,u,path,method,core):
@@ -275,7 +276,14 @@ def handle(h,c,u,path,method,core):
             core.record(c,u,'overtime_'+status,'employee',e['id'],day);c.commit()
         return respond([dict(r) for r in c.execute('SELECT * FROM overtime_reviews WHERE employee_id=? ORDER BY day DESC',(e['id'],))])
     if path=='/api/email-outbox' and method=='GET':
-        admin();return respond([dict(r) for r in c.execute('SELECT id,user_id,request_id,subject,status,attempts,created_at,sent_at FROM email_outbox ORDER BY id DESC LIMIT 100')])
+        admin();scope=permissions.scope_company(c,u);profile=permissions.profile(c,u)
+        rows=[]
+        for r in c.execute('SELECT o.id,o.user_id,o.request_id,o.subject,o.status,o.attempts,o.created_at,o.sent_at,r.company_id,r.type request_type FROM email_outbox o JOIN requests r ON r.id=o.request_id WHERE (? IS NULL OR r.company_id=?) ORDER BY o.id DESC LIMIT 100',(scope,scope)):
+            if profile=='payroll' and r['request_type']!='advance':continue
+            if profile=='hr' and r['request_type']=='advance':continue
+            if profile=='auditor' and r['request_type'] in ('hr_contact','sick_leave','investigation'):continue
+            rows.append(dict(r))
+        return respond(rows)
     if path=='/api/notifications' and method=='GET':
         return respond([dict(r) for r in c.execute('SELECT n.*,e.name employee_name,e.employee_no,r.type request_type FROM notifications n LEFT JOIN requests r ON r.id=n.request_id LEFT JOIN employees e ON e.id=r.employee_id WHERE n.user_id=? ORDER BY n.id DESC LIMIT 100',(u['id'],))])
     if path=='/api/notifications/read' and method=='POST':
@@ -358,6 +366,7 @@ def handle(h,c,u,path,method,core):
         if status not in ('approved','excused') or not note:core.fail('اختر القرار واكتب ملاحظاته')
         items=scan_absences(c,e,day,day,core)
         if not items or items[0]['status']!='pending':core.fail('اليوم غير متاح لاعتماد غياب جديد')
+        permissions.company(c,u,workforce.terms_at(c,e,day)['company_id'],core)
         payroll.assert_open(c,e['id'],day,day,core)
         rate,basis=daily_rate(c,e,dt.date.fromisoformat(day),core) if status=='approved' else (0,'')
         cid=ensure_contract(c,e);fraction=items[0]['leave_days'] if status=='approved' else 0

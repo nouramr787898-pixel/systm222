@@ -22,9 +22,11 @@ def guard(h,c,u,path,method,core):
     scope_request(h,c,u,path,method,core)
     role=profile(c,u)
     if role in ('owner','manager','employee'):return
+    if role=='hr' and path in ('/api/supervisor-candidates','/api/supervisor-accounts','/api/action-items','/api/attendance-calendar'):return
+    if path=='/api/action-items' and method=='GET':return
     if path in ('/api/me','/api/logout') or path.startswith('/api/security/'):return
     if role=='auditor':
-        if method!='GET' or not (path in ('/api/delegations','/api/attachments','/api/employees','/api/companies','/api/requests','/api/dashboard','/api/audit','/api/payroll','/api/loans','/api/pay-adjustments','/api/reports','/api/notifications','/api/notifications/unread') or path.startswith('/api/payroll/')):core.fail('حساب المراجع للقراءة فقط',403)
+        if method!='GET' or not (path in ('/api/email-outbox','/api/delegations','/api/attachments','/api/employees','/api/companies','/api/requests','/api/dashboard','/api/audit','/api/payroll','/api/loans','/api/pay-adjustments','/api/reports','/api/notifications','/api/notifications/unread') or path.startswith('/api/payroll/')):core.fail('حساب المراجع للقراءة فقط',403)
         return
     financial=path.startswith(('/api/payroll','/api/loans','/api/pay-adjustments','/api/payslips'))
     if role=='hr':
