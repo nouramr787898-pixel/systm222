@@ -418,7 +418,7 @@ def visible_employees(c,u,include_archived=False):
    for key in ('passport','birth_date','photo','qualification','specialization','identity_no'):e.pop(key,None)
  return [workforce.redact(e,u) for e in rows]
 
-def visible_requests(c,u,include_details=True,request_id=None):
+def visible_requests(c,u,include_details=True,request_id=None,aggregate=False):
  q='''SELECT r.*,e.name employee_name,e.employee_no,c.name company_name,c.approval_mode FROM requests r JOIN employees e ON e.id=r.employee_id JOIN companies c ON c.id=r.company_id WHERE 1=1''';p=[]
  if u['role']=='employee':q+=' AND r.employee_id=?';p=[u['employee_id']]
  elif u['role']=='manager':q+=' AND r.company_id=? AND (e.manager_id=? OR r.employee_id=? OR e.manager_id IN (SELECT source_manager_id FROM approval_delegations WHERE target_manager_id=? AND company_id=? AND revoked=0 AND starts_on<=? AND ends_on>=?))';p=[u['company_id'],u['employee_id'],u['employee_id'],u['employee_id'],u['company_id'],TODAY().isoformat(),TODAY().isoformat()]
@@ -431,6 +431,9 @@ def visible_requests(c,u,include_details=True,request_id=None):
  elif profile=='hr':q+=" AND r.type!='advance'"
  elif profile=='auditor':q+=" AND r.type NOT IN ('hr_contact','sick_leave','investigation')"
  if request_id is not None:q+=' AND r.id=?';p.append(request_id)
+ if aggregate:
+  q=q.replace('SELECT r.*,e.name employee_name,e.employee_no,c.name company_name,c.approval_mode','SELECT r.type,r.status,COUNT(*) count',1)
+  return [dict(x) for x in c.execute(q+' GROUP BY r.type,r.status ORDER BY r.type,r.status',p)]
  q+=' ORDER BY r.id DESC'
  rows=[dict(x) for x in c.execute(q,p)]
  for row in rows:
