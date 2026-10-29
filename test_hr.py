@@ -263,18 +263,12 @@ class HRTests(unittest.TestCase):
         self.assertEqual(result['release'],'professional-v1')
         self.assertEqual(set(result),{'status','release','database','commit'})
 
-    def test_otp_email_or_phone_with_mocked_providers(self):
-        self.assertEqual(self.admin('employees/2',{'email':'demo@example.test','phone_country':'+966','phone_local':'501234567'})[0],200)
-        captured=[]
-        with patch.object(server,'resend_send_reset',side_effect=lambda dest,code:captured.append(code) or True):
-            self.assertEqual(self.employee('password/request',{'username':'employee','channel':'email'})[0],200)
-        result=self.employee('password/verify',{'username':'employee','channel':'email','code':captured[0]})
-        self.assertEqual(result[0],200,result)
-        self.assertEqual(self.employee('password/confirm',{'username':'employee','reset_token':result[1]['reset_token'],'new_password':'Changed@123456'})[0],200)
-        other=self.client('employee','Changed@123456')
-        with patch.object(server,'authevo_send',return_value=True),patch.object(server,'authevo_verify',return_value=True):
-            self.assertEqual(other('password/request',{'username':'employee','channel':'whatsapp'})[0],200)
-            self.assertEqual(other('password/verify',{'username':'employee','channel':'whatsapp','code':'123456'})[0],200)
+    def test_employee_recovery_is_disabled_without_contacting_providers(self):
+        with patch.object(server,'resend_send_reset') as mail,patch.object(server,'authevo_send') as whatsapp:
+            for path in ('request','verify','confirm','resend-whatsapp'):
+                self.assertEqual(self.employee('password/'+path,{'username':'employee','new_password':'Changed@123456'})[0],403)
+            mail.assert_not_called();whatsapp.assert_not_called()
+        self.client('employee','Employee@123')
 
 
 if __name__=='__main__':unittest.main()

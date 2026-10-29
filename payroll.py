@@ -123,6 +123,12 @@ def handle(h,c,u,path,method,core):
     def reply(data,status=200):h.write(data,status);return True
     def admin():
         if u['role']!='admin':core.fail('العمليات المالية للإدارة فقط',403)
+    if path=='/api/payroll/simulate' and method=='GET':
+        admin();company=int(q.get('company_id',[0])[0]);permissions.company(c,u,company,core)
+        month=month_value(q.get('month',[''])[0])
+        if not c.execute('SELECT 1 FROM companies WHERE id=? AND archived=0',(company,)).fetchone():core.fail('الشركة غير متاحة',404)
+        lines,digest=source(c,company,month,core)
+        return reply({'simulation':True,'money_transferred':False,'company_id':company,'month':month,'source_hash':digest,'lines':lines,'net_cents':sum(r['net_cents'] for r in lines)})
     if path=='/api/loans':
         if u['role']=='manager':core.fail('السلف للموظف المعني والإدارة فقط',403)
         rows=[]
@@ -137,6 +143,7 @@ def handle(h,c,u,path,method,core):
         reference=str(d.get('reference','')).strip();date=core.normalize_date(d.get('paid_on'))
         if not reference or len(reference)>150 or not date or date>core.TODAY().isoformat():core.fail('مرجع الصرف وتاريخه الصحيح مطلوبان')
         if c.execute('SELECT 1 FROM loans WHERE request_id=?',(r['id'],)).fetchone():core.fail('السلفة مصروفة بالفعل',409)
+        if r['installment']<=0:core.fail('خطة سداد السلفة غير محددة؛ الصرف موقوف',409)
         e=core.user_allowed_emp(c,u,r['employee_id']);validate_advance(c,e,r['amount'],r['installment'],core,r['id'])
         cur=c.execute('INSERT INTO loans(request_id,employee_id,principal_cents,installment_cents,disbursed_on,reference,created_by) VALUES(?,?,?,?,?,?,?)',(r['id'],r['employee_id'],cents(r['amount']),cents(r['installment']),date,reference,u['id']));core.record(c,u,'loan_disbursement','employee',r['employee_id'],{'loan_id':cur.lastrowid,'reference':reference});c.commit();return reply({'id':cur.lastrowid,'money_transferred':False},201)
     if re.fullmatch('/api/loans/[0-9]+/repay',path) and method=='POST':

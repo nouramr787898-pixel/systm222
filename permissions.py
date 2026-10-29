@@ -24,7 +24,7 @@ def guard(h,c,u,path,method,core):
     if path=='/api/assistant' and method in ('GET','POST'):return
     if role in ('owner','manager','employee'):return
     if role=='hr' and path in ('/api/supervisor-candidates','/api/supervisor-accounts','/api/action-items','/api/attendance-calendar'):return
-    if path=='/api/action-items' and method=='GET':return
+    if path in ('/api/action-items','/api/data-quality','/api/request-progress') and method=='GET':return
     if path.startswith('/api/attachments/') and method=='GET':return # request_access checks company, role and sensitive request type
     if path in ('/api/me','/api/logout') or path.startswith('/api/security/'):return
     if role=='auditor':

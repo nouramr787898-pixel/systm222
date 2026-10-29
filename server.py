@@ -538,7 +538,28 @@ class Handler(BaseHTTPRequestHandler):
    d=self.input();full=c.execute('SELECT password_hash FROM users WHERE id=?',(u['id'],)).fetchone()
    if not verifypw(str(d.get('password','')),full[0]):fail('كلمة المرور الحالية غير صحيحة',403)
    c.execute('DELETE FROM auth_sessions WHERE user_id=?',(u['id'],));record(c,u,'sessions_revoked','user',u['id']);c.commit();self.write({'ok':True});return True
+  if path=='/api/security/employee-passwords':
+   if permissions.profile(c,u) not in ('owner','hr','manager'):fail('تغيير كلمات الموظفين للإدارة والمشرف المختص فقط',403)
+   if method=='GET':
+    allowed={e['id'] for e in visible_employees(c,u) if e['id']!=u['employee_id']}
+    return self.write([dict(r) for r in c.execute("SELECT a.id user_id,a.username,e.id employee_id,e.name employee_name,e.company_id FROM users a JOIN employees e ON e.id=a.employee_id WHERE a.role='employee' AND a.disabled=0 ORDER BY e.name") if r['employee_id'] in allowed]) or True
+   if method!='POST':fail('طريقة غير مسموحة',405)
+   d=self.input();security.attempt(c,u['username'],security.peer(self),sys.modules[__name__])
+   full=c.execute('SELECT password_hash FROM users WHERE id=?',(u['id'],)).fetchone()
+   if not verifypw(str(d.get('current_password','')),full[0]):fail('كلمة مرور المسؤول غير صحيحة',403)
+   target=c.execute("SELECT * FROM users WHERE id=? AND role='employee'",(int(d.get('user_id',0)),)).fetchone()
+   if not target:fail('حساب الموظف غير موجود',404)
+   employee=user_allowed_emp(c,u,target['employee_id'])
+   if employee['id']==u['employee_id'] or employee['archived'] or not self.account_active(c,target):fail('الحساب غير متاح لهذا الإجراء',403)
+   password=str(d.get('new_password',''))
+   if not 12<=len(password)<=128:fail('كلمة المرور الجديدة 12–128 حرفًا')
+   c.execute('UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?',(hashpw(password),target['id']))
+   c.execute('DELETE FROM auth_sessions WHERE user_id=?',(target['id'],))
+   c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(target['id'],))
+   record(c,u,'employee_password_change','employee',employee['id'],{'user_id':target['id']})
+   c.commit();self.write({'ok':True});return True
   if path=='/api/security/password' and method=='POST':
+   if u['role']=='employee':fail('تغيير كلمة مرور الموظف بواسطة الإدارة فقط',403)
    d=self.input();full=c.execute('SELECT password_hash FROM users WHERE id=?',(u['id'],)).fetchone()
    security.attempt(c,u['username'],security.peer(self),sys.modules[__name__])
    password=str(d.get('new_password',''))
@@ -551,6 +572,8 @@ class Handler(BaseHTTPRequestHandler):
  def process(self,method):
   if hasattr(self,'_parsed_body'):del self._parsed_body
   path=urlparse(self.path).path
+  if method=='POST' and path.startswith('/api/password/'):
+   return self.write({'error':'استعادة كلمة مرور الموظف بواسطة الإدارة فقط'},403)
   if method=='GET' and path=='/api/health':
    try:
     health=sqlite3.connect(DB.resolve().as_uri()+'?mode=ro',uri=True)
@@ -574,6 +597,7 @@ class Handler(BaseHTTPRequestHandler):
   if method=='GET' and path=='/workflow-ui.js':return self.write((BASE/'workflow-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/professional-ui.js':return self.write((BASE/'professional-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/hr-ui.js':return self.write((BASE/'hr-ui.js').read_bytes(),ctype='text/javascript')
+  if method=='GET' and path=='/ux-controls.js':return self.write((BASE/'ux-controls.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/app.js':return self.write((BASE/'app.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path in ('/favicon.ico','/favicon.png','/ehkam-icon.png','/ehkam-logo-full.png'):
    return self.write((BASE/path.lstrip('/')).read_bytes(),ctype='image/x-icon' if path.endswith('.ico') else 'image/png')
@@ -713,7 +737,7 @@ class Handler(BaseHTTPRequestHandler):
     record(c,u,'password_reset','user',u['id']);c.commit();return self.write({'ok':True})
    u=self.actor(c)
    permissions.guard(self,c,u,path,method,sys.modules[__name__])
-   if u['must_change_password'] and path not in ('/api/me','/api/security/password','/api/security/sessions','/api/logout'):fail('غيّر كلمة المرور المؤقتة من أمان الحساب أولًا',403)
+   if u['must_change_password'] and u['role']!='employee' and path not in ('/api/me','/api/security/password','/api/security/sessions','/api/logout'):fail('غيّر كلمة المرور المؤقتة من أمان الحساب أولًا',403)
    if ai_assistant.handle(self,c,u,path,method,sys.modules[__name__]):return
    if ui_workflows.handle(self,c,u,path,method,sys.modules[__name__]):return
    if directory_tools.handle(self,c,u,path,method,sys.modules[__name__]):return
@@ -725,7 +749,7 @@ class Handler(BaseHTTPRequestHandler):
    if path=='/api/supervisors' and method=='GET':
     if u['role']!='admin':fail('غير مصرح',403)
     return self.write(permissions.filter_rows(c,u,c.execute("SELECT e.id,e.name,e.company_id,u.id user_id,u.username FROM employees e JOIN users u ON u.employee_id=e.id AND u.role='manager' AND u.company_id=e.company_id WHERE e.archived=0")))
-   if path=='/api/me' and method=='GET':return self.write({**dict(u),'timezone':'Asia/Riyadh','currency':'SAR','profile':permissions.profile(c,u),'company_scope':permissions.scope_company(c,u)})
+   if path=='/api/me' and method=='GET':return self.write({**dict(u),'must_change_password':bool(u['must_change_password'] and u['role']!='employee'),'timezone':'Asia/Riyadh','currency':'SAR','profile':permissions.profile(c,u),'company_scope':permissions.scope_company(c,u)})
    if path=='/api/logout' and method=='POST':
     record(c,u,'logout','user',u['id']);c.commit()
     cookie=SimpleCookie();cookie.load(self.headers.get('Cookie',''));v=cookie.get('ehkam_session')
@@ -835,8 +859,10 @@ class Handler(BaseHTTPRequestHandler):
     eid=int(path.rsplit('/',1)[1]);e=user_allowed_emp(c,u,eid);return self.write(leave(c,e))
    if path=='/api/advance/preview' and method=='GET':
     qs=parse_qs(urlparse(self.path).query);eid=int(qs.get('employee_id',[u['employee_id'] or 0])[0]);e=user_allowed_emp(c,u,eid)
-    months=remaining_months(hr.employment_end(c,e),TODAY());gross=salary(e);monthly_limit=round(gross*.35,2)
-    return self.write({'gross_salary':gross,'remaining_months':months,'max_monthly_installment':monthly_limit,'max_advance':round(monthly_limit*months,2),'contract_end':e['contract_end']})
+    if u['role']=='manager' and e['id']!=u['employee_id']:fail('البيانات المالية خاصة بالموظف والإدارة',403)
+    end=hr.employment_end(c,e);months=remaining_months(end,TODAY());gross=salary(e);monthly_limit=round(gross*.35,2)
+    committed,monthly_committed=payroll.commitments(c,e['id'])
+    return self.write({'gross_salary':gross,'remaining_months':months,'max_monthly_installment':monthly_limit,'max_advance':max(0,round(monthly_limit*months-committed/100,2)),'contract_end':end,'committed_amount':committed/100,'monthly_committed':monthly_committed/100,'repayment_plan_required':True,'policy_note':'Existing repository policy; not a statutory entitlement determination'})
    if path.startswith('/api/attachments/') and method=='GET':
     aid=int(path.rsplit('/',1)[1])
     attachment=c.execute('SELECT * FROM request_attachments WHERE id=?',(aid,)).fetchone()
@@ -892,8 +918,8 @@ class Handler(BaseHTTPRequestHandler):
      limit=round(salary(e)*.35*remaining_months(hr.employment_end(c,e),TODAY()),2)
      if amount<=0 or amount>limit:fail('طلب السلفة يتجاوز الحد المستحق: '+str(limit)+' ريال')
      payroll.validate_advance(c,e,amount,inst,sys.modules[__name__])
-     if inst<=0 or inst>salary(e)*.35:fail('القسط الشهري يتجاوز 35% من الراتب')
-     if inst*remaining_months(hr.employment_end(c,e),TODAY())<amount:fail('القسط لا يسدد السلفة قبل انتهاء العقد')
+     if inst<0 or inst>salary(e)*.35:fail('القسط الشهري يتجاوز 35% من الراتب')
+     if inst and inst*remaining_months(hr.employment_end(c,e),TODAY())<amount:fail('القسط لا يسدد السلفة قبل انتهاء العقد')
      minimum=c.execute('SELECT advance_min_days FROM companies WHERE id=?',(e['company_id'],)).fetchone()[0]
      if not e['contract_end'] or (datetime.date.fromisoformat(e['contract_end'])-TODAY()).days<minimum:fail('مدة العقد المتبقية أقل من الحد المسموح في سياسة الشركة')
     if typ=='sick_leave' and not d.get('notes') and not attachments:fail('أضف ملاحظات أو مستندًا طبيًا')
@@ -931,7 +957,9 @@ class Handler(BaseHTTPRequestHandler):
      if r['type']=='punch_fix':fail('التصحيح المعتمد لا يلغى؛ يلزم تصحيح لاحق يحفظ السجل',409)
      if r['type']=='termination' and c.execute('SELECT 1 FROM settlements WHERE request_id=?',(rid,)).fetchone():fail('الإنهاء له تسوية مالية؛ يلزم تسوية عكسية منفصلة',409)
     if r['start_date'] and r['end_date']:payroll.assert_open(c,e['id'],r['start_date'],r['end_date'],sys.modules[__name__])
-    if action=='approved' and r['type']=='advance':payroll.validate_advance(c,e,r['amount'],r['installment'],sys.modules[__name__],rid)
+    if action=='approved' and r['type']=='advance':
+     if r['installment']<=0:fail('خطة سداد السلفة غير محددة؛ لا يمكن الاعتماد أو الصرف قبل مراجعتها',409)
+     payroll.validate_advance(c,e,r['amount'],r['installment'],sys.modules[__name__],rid)
     if r['type']=='termination':
      last=json.loads(r['details']).get('last_work_day')
      if last:payroll.assert_open(c,e['id'],last,e['contract_end'] or '9999-12-31',sys.modules[__name__])

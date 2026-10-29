@@ -52,11 +52,11 @@ class ProfessionalTests(unittest.TestCase):
         self.assertTrue(any(r['action']=='login_failed' for r in self.admin('audit')[1]))
 
     def test_password_change_revokes_all_sessions(self):
-        other=self.client('employee','Employee@123')
-        self.assertEqual(self.employee('security/password',{'current_password':'bad','new_password':'LongNewPassword!123'})[0],403)
-        self.assertEqual(self.employee('security/password',{'current_password':'Employee@123','new_password':'LongNewPassword!123'})[0],200)
+        other=self.client('admin','Admin@123')
+        self.assertEqual(self.admin('security/password',{'current_password':'bad','new_password':'LongNewPassword!123'})[0],403)
+        self.assertEqual(self.admin('security/password',{'current_password':'Admin@123','new_password':'LongNewPassword!123'})[0],200)
         self.assertEqual(other('me')[0],401)
-        self.client('employee','LongNewPassword!123')
+        self.client('admin','LongNewPassword!123')
 
     def test_totp_enrollment_and_replay_prevention(self):
         stamp=int(time.time())//30*30
@@ -166,14 +166,14 @@ class ProfessionalTests(unittest.TestCase):
             self.assertEqual(c.execute('PRAGMA integrity_check').fetchone()[0],'ok')
             self.assertEqual(c.execute('PRAGMA foreign_key_check').fetchall(),[])
 
-    def test_import_preview_atomic_commit_and_forced_password_change(self):
+    def test_import_preview_atomic_commit_and_admin_managed_password(self):
         body={'company_id':1,'csv':'name,username,basic,phone_local\nImport Test,import_user,4500,501234567\n'}
         status,preview=self.admin('import/preview',body);self.assertEqual(status,200);self.assertEqual(preview['errors'],[])
         status,result=self.admin('import/commit',{'token':preview['token']});self.assertEqual(status,201,result)
         account=result['accounts'][0];person=self.client(account['username'],account['temporary_password'],'employee')
-        self.assertEqual(person('employees')[0],403)
-        self.assertEqual(person('security/password',{'current_password':account['temporary_password'],'new_password':'UniquePassword!2026'})[0],200)
-        self.assertEqual(self.client('import_user','UniquePassword!2026','employee')('employees')[0],200)
+        self.assertEqual(person('employees')[0],200)
+        self.assertEqual(person('security/password',{'current_password':account['temporary_password'],'new_password':'UniquePassword!2026'})[0],403)
+        self.assertEqual(self.client('import_user',account['temporary_password'],'employee')('employees')[0],200)
         self.assertEqual(self.admin('import/commit',{'token':preview['token']})[0],409)
         bad=self.admin('import/preview',{'company_id':1,'csv':'name,username,basic\nBad,bad_import,-1\n'})[1]
         self.assertIsNone(bad['token']);self.assertEqual(len(bad['errors']),1)

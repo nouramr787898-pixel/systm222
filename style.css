@@ -141,3 +141,5 @@
 .attachment-viewer-head{position:sticky;top:0;background:#fff;padding-bottom:8px;z-index:1}.attachment-viewer.is-actual-size>img{max-width:none;max-height:none}.attachment-viewer-head>strong{flex:1}@media(max-width:480px){.attachment-viewer-head{flex-wrap:wrap}.attachment-viewer-head>strong{flex-basis:100%}}
 
 .chat-brand,.chat-brand>div{min-width:0}.chat-brand strong{overflow-wrap:anywhere}.chat-reset{flex-shrink:0}
+
+.password-control{position:relative;display:flex;align-items:center;width:100%;min-width:0}.password-control input{padding-inline-end:3.2rem;width:100%;min-width:0}.password-eye{position:absolute;inset-inline-end:.3rem;top:50%;transform:translateY(-50%);width:2.4rem;height:2.4rem;padding:0;background:transparent;color:#00513a;border:1px solid #b6cbc3;border-radius:.5rem}.password-eye:focus-visible{outline:3px solid #bd9c4d}

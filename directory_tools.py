@@ -65,10 +65,10 @@ def handle(h,c,u,path,method,core):
             number=c.execute('UPDATE employee_number_sequence SET value=value+1 WHERE id=1 RETURNING value').fetchone()[0];d['employee_no']=f'EH-{number:04d}'
             keys=[k for k in d if k!='username'];cur=c.execute('INSERT INTO employees('+','.join(keys)+') VALUES('+','.join('?' for _ in keys)+')',[d[k] for k in keys]);eid=cur.lastrowid
             password=secrets.token_urlsafe(18)
-            c.execute('INSERT INTO users(username,password_hash,role,employee_id,company_id,display_name,must_change_password) VALUES(?,?,"employee",?,?,?,1)',(d['username'],core.hashpw(password),eid,d['company_id'],d['name']))
+            c.execute('INSERT INTO users(username,password_hash,role,employee_id,company_id,display_name,must_change_password) VALUES(?,?,"employee",?,?,?,0)',(d['username'],core.hashpw(password),eid,d['company_id'],d['name']))
             core.hr.ensure_contract(c,c.execute('SELECT * FROM employees WHERE id=?',(eid,)).fetchone());core.record(c,u,'employee_import','employee',eid)
             accounts.append({'username':d['username'],'temporary_password':password,'employee_no':d['employee_no']})
-        c.execute('UPDATE import_previews SET used=1,payload="" WHERE token_hash=?',(token,));c.commit();return reply({'created':len(accounts),'accounts':accounts,'notice':'اعرض بيانات الدخول مرة واحدة وسلمها لكل موظف عبر قناة آمنة. تغييرها إلزامي عند أول دخول.'},201)
+        c.execute('UPDATE import_previews SET used=1,payload="" WHERE token_hash=?',(token,));c.commit();return reply({'created':len(accounts),'accounts':accounts,'notice':'اعرض بيانات الدخول مرة واحدة وسلمها لكل موظف عبر قناة آمنة. تغيير كلمة مرور الموظف يتم بواسطة الإدارة أو المشرف المختص.'},201)
     if path=='/api/employment-letter' and method=='GET':
         q=parse_qs(urlparse(h.path).query);eid=int(q.get('employee_id',[u['employee_id'] or 0])[0])
         if u['role']!='admin' and eid!=u['employee_id']:core.fail('الخطاب للموظف المعني والإدارة فقط',403)

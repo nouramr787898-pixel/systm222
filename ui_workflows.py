@@ -11,6 +11,30 @@ import workforce
 TYPE_NAMES = {'annual_leave':'إجازة سنوية','sick_leave':'إجازة مرضية','unpaid_leave':'إجازة غير مدفوعة','advance':'سلفة','permission':'استئذان','punch_fix':'تصحيح حضور وانصراف','termination':'إنهاء تعاقد','delegation':'انتداب','hr_contact':'تواصل مع الموارد البشرية','investigation':'تحقيق','open':'طلب'}
 
 
+def request_progress(c,row,core):
+    e=c.execute('SELECT * FROM employees WHERE id=?',(row['employee_id'],)).fetchone()
+    mode=c.execute('SELECT approval_mode FROM companies WHERE id=?',(row['company_id'],)).fetchone()[0]
+    decisions=[dict(d) for d in c.execute('SELECT status,decided_at,username FROM request_decisions WHERE request_id=? ORDER BY id',(row['id'],))]
+    final=row['status'] not in ('new','review')
+    sensitive=row['type'] in ('advance','sick_leave','termination','investigation','hr_contact')
+    reviewed=any(d['status']=='manager_approved' for d in decisions)
+    role='none' if final else 'employee' if row['type']=='delegation' else 'admin' if sensitive or mode=='admin_only' or (mode=='supervisor_then_admin' and (reviewed or not e['manager_id'])) else 'manager' if mode=='supervisor_then_admin' else 'manager_or_admin'
+    label={'none':'لا إجراء معلق','employee':'الموظف المعني','admin':'الإدارة المختصة','manager':'المشرف المباشر','manager_or_admin':'المشرف المباشر أو الإدارة المختصة'}[role]
+    if role in ('manager','manager_or_admin') and e['manager_id']:
+        manager=c.execute('SELECT name FROM employees WHERE id=?',(e['manager_id'],)).fetchone()
+        if manager:label=manager[0]+(' أو الإدارة المختصة' if role=='manager_or_admin' else ' · المشرف المباشر')
+    def parse(value):
+        try:
+            stamp=dt.datetime.fromisoformat(value)
+            return stamp if stamp.tzinfo else stamp.replace(tzinfo=dt.timezone.utc)
+        except (ValueError,TypeError):return None
+    now=dt.datetime.now(dt.timezone.utc);previous=parse(row['created_at']);stages=[]
+    for d in decisions:
+        stamp=parse(d['decided_at']);seconds=max(0,int((stamp-previous).total_seconds())) if stamp and previous else None
+        stages.append({**d,'elapsed_seconds':seconds});previous=stamp or previous
+    return {'next_role':role,'responsible':label,'stage_started_at':previous.isoformat() if previous else None,'stage_elapsed_seconds':max(0,int((now-previous).total_seconds())) if previous and not final else None,'stages':stages,'delay_threshold_seconds':None,'delay_policy_note':'لم تُحدد مهلة معتمدة لهذه المرحلة؛ المعروض زمن انتظار فعلي فقط'}
+
+
 def action_items(c,u,core):
     if permissions.profile(c,u)=='auditor':return []
     rows=core.visible_requests(c,u,False)
@@ -19,7 +43,13 @@ def action_items(c,u,core):
         if row['status'] not in ('new','review'):continue
         if u['role']!='employee' and (row['employee_id']==u['employee_id'] or row['type']=='delegation'):continue
         if u['role']=='manager' and row['approval_mode']=='supervisor_then_admin' and c.execute("SELECT 1 FROM request_decisions d JOIN employees e ON e.id=? JOIN users actor ON actor.id=d.user_id WHERE d.request_id=? AND d.status='manager_approved' AND COALESCE(d.effective_manager_id,actor.employee_id)=e.manager_id",(row['employee_id'],row['id'])).fetchone():continue
-        result.append({'id':row['id'],'employee_id':row['employee_id'],'employee_name':row['employee_name'],'employee_no':row['employee_no'],'type':row['type'],'status':row['status'],'created_at':row['created_at'],'message':row['employee_name']+' طلب '+TYPE_NAMES.get(row['type'],'طلب')})
+        progress=request_progress(c,row,core)
+        profile=permissions.profile(c,u)
+        if profile=='hr' and row['type']=='advance':continue
+        if profile=='payroll' and row['type']!='advance':continue
+        if u['role']=='manager' and progress['next_role'] not in ('manager','manager_or_admin'):continue
+        if u['role']=='admin' and progress['next_role'] in ('manager','employee'):continue
+        result.append({'progress':progress,'id':row['id'],'employee_id':row['employee_id'],'employee_name':row['employee_name'],'employee_no':row['employee_no'],'type':row['type'],'status':row['status'],'created_at':row['created_at'],'message':row['employee_name']+' طلب '+TYPE_NAMES.get(row['type'],'طلب')})
     return result
 
 
@@ -58,6 +88,32 @@ def handle(h,c,u,path,method,core):
     from urllib.parse import parse_qs,urlparse
     q=parse_qs(urlparse(h.path).query)
     def reply(data,status=200):h.write(data,status);return True
+    if path=='/api/leave/evidence' and method=='GET':
+        eid=int(q.get('employee_id',[u['employee_id'] or 0])[0]);e=core.user_allowed_emp(c,u,eid)
+        if u['role']=='manager' and eid!=u['employee_id']:core.fail('تفاصيل الرصيد للموظف والإدارة',403)
+        balance=core.leave(c,e);cid=balance['contract_id']
+        annual=[dict(r) for r in c.execute("SELECT id,start_date,end_date,days,status FROM requests WHERE employee_id=? AND contract_id IS ? AND type='annual_leave' AND status='approved' ORDER BY id",(eid,cid))]
+        absences=[dict(r) for r in c.execute("SELECT id,day,leave_days FROM absences WHERE employee_id=? AND contract_id IS ? AND status='approved' ORDER BY day",(eid,cid))]
+        settlements=[dict(r) for r in c.execute('SELECT id,days FROM settlements WHERE employee_id=? AND contract_id IS ? ORDER BY id',(eid,cid))]
+        return reply({'balance':balance,'opening_recorded':e['carryover'],'opening_provenance':'قيمة افتتاحية مسجلة؛ لا يثبت النظام مصدرًا أقدم غير موثق','approved_leave':annual,'approved_absences':absences,'settlements':settlements,'automatic_changes':False})
+    if path=='/api/data-quality' and method=='GET':
+        if permissions.profile(c,u) not in ('owner','hr','auditor'):core.fail('مركز جودة البيانات للإدارة والمراجع فقط',403)
+        issues=[]
+        for e in core.visible_employees(c,u):
+            def add(code,message):issues.append({'employee_id':e['id'],'employee_name':e['name'],'employee_no':e['employee_no'],'company_id':e['company_id'],'code':code,'message':message})
+            for key,label in [('contract_start','بداية العقد'),('contract_end','نهاية العقد'),('department','القسم'),('manager_id','المشرف المباشر')]:
+                if not e.get(key):add('missing_'+key,'بيان غير مسجل: '+label)
+            if e.get('contract_start') and e.get('contract_end') and e['contract_end']<e['contract_start']:add('contract_order','نهاية العقد تسبق بدايته')
+            if e.get('manager_id') and not c.execute('SELECT 1 FROM employees WHERE id=? AND company_id=? AND archived=0',(e['manager_id'],e['company_id'])).fetchone():add('invalid_manager','المشرف غير نشط أو يتبع شركة أخرى')
+            balance=core.leave(c,c.execute('SELECT * FROM employees WHERE id=?',(e['id'],)).fetchone())
+            if balance['available']<0:add('negative_leave','رصيد الإجازة سالب؛ يحتاج مطابقة دون تصحيح تلقائي')
+            if c.execute("SELECT 1 FROM requests WHERE employee_id=? AND type='advance' AND status IN ('new','review','approved') AND installment<=0",(e['id'],)).fetchone():add('missing_repayment_plan','سلفة بلا خطة سداد محددة؛ لا يُفترض قسط تلقائي')
+        return reply({'issues':issues,'automatic_changes':False})
+    if path=='/api/request-progress' and method=='GET':
+        row=c.execute('SELECT * FROM requests WHERE id=?',(int(q.get('request_id',[0])[0]),)).fetchone()
+        if not row:core.fail('الطلب غير موجود',404)
+        core.request_access(c,u,row)
+        return reply(request_progress(c,row,core))
     if path=='/api/action-items' and method=='GET':return reply(action_items(c,u,core))
     if path=='/api/notifications/unread' and method=='GET':
         return reply({'count':len(action_items(c,u,core))})
