@@ -596,15 +596,6 @@ class Handler(BaseHTTPRequestHandler):
   if method=='GET' and path=='/professional-ui.js':return self.write((BASE/'professional-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/hr-ui.js':return self.write((BASE/'hr-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/ux-controls.js':return self.write((BASE/'ux-controls.js').read_bytes(),ctype='text/javascript')
-  if method=='GET' and path=='/intro-male.mp3':
-   data=(BASE/'intro-male.mp3').read_bytes();size=len(data);requested=self.headers.get('Range')
-   headers={'Accept-Ranges':'bytes'}
-   if not requested:return self.write(data,ctype='audio/mpeg',headers=headers)
-   match=re.fullmatch(r'bytes=([0-9]{0,12})-([0-9]{0,12})',requested)
-   if not match or not any(match.groups()):return self.write(b'',416,ctype='audio/mpeg',headers={**headers,'Content-Range':f'bytes */{size}'})
-   first,last=match.groups();start=int(first) if first else max(0,size-int(last));end=min(size-1,int(last)) if first and last else size-1
-   if start>=size or end<start or (not first and int(last)==0):return self.write(b'',416,ctype='audio/mpeg',headers={**headers,'Content-Range':f'bytes */{size}'})
-   return self.write(data[start:end+1],206,ctype='audio/mpeg',headers={**headers,'Content-Range':f'bytes {start}-{end}/{size}'})
   if method=='GET' and path=='/intro.js':return self.write((BASE/'intro.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/app.js':return self.write((BASE/'app.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path in ('/favicon.ico','/favicon.png','/ehkam-icon.png','/ehkam-logo-full.png'):
