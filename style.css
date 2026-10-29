@@ -180,10 +180,10 @@
 /* EHKAM logo greeting: the existing brand asset stays unchanged. */
 .ehkam-intro{position:fixed;inset:0;height:100%;height:100dvh;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px);z-index:10000;display:grid;place-items:center;overflow:hidden;background:radial-gradient(ellipse at 50% 45%,#fff 0,#f2f7f4 62%,#e5eee8 100%);color:var(--green);outline:none;animation:ehkam-intro-exit .4s 6.4s ease-in forwards}
 .intro-lockup{position:relative;--logo-width:clamp(290px,32vw,380px);--logo-gap:clamp(24px,3vw,42px);width:min(1100px,92vw);height:320px}
-.intro-logo{position:absolute;left:var(--logo-final-left,calc(100% - var(--logo-width)/2));top:50%;width:var(--logo-width);transform:translate(-50%,-50%);animation:ehkam-logo-arrive .6s cubic-bezier(.2,.7,.25,1) both,ehkam-logo-position .8s 1.65s cubic-bezier(.22,.7,.2,1) both;mix-blend-mode:multiply}
+.intro-logo{position:absolute;left:var(--logo-final-left,calc(var(--logo-width)/2));top:50%;width:var(--logo-width);transform:translate(-50%,-50%);animation:ehkam-logo-arrive .6s cubic-bezier(.2,.7,.25,1) both,ehkam-logo-position .8s 1.65s cubic-bezier(.22,.7,.2,1) both;mix-blend-mode:multiply}
 .intro-logo svg{width:100%;display:block;overflow:hidden}.intro-logo-image{mix-blend-mode:multiply}
 .intro-face{animation:ehkam-face-appear .2s .5s both}
-.intro-name{position:absolute;left:0;top:50%;transform:translateY(-50%);width:calc(100% - var(--logo-width) - var(--logo-gap));display:flex;direction:rtl;justify-content:center;align-items:center;gap:14px;font-size:clamp(32px,4vw,54px);font-weight:750;line-height:1.6;text-align:center}
+.intro-name{position:absolute;left:calc(var(--logo-width) + var(--logo-gap));top:50%;transform:translateY(-50%);width:calc(100% - var(--logo-width) - var(--logo-gap));display:flex;direction:ltr;justify-content:center;align-items:center;gap:14px;font-size:clamp(30px,3.6vw,50px);font-weight:750;line-height:1.6;text-align:center}
 .intro-word{display:inline-block;animation:ehkam-name-arrive .5s 2.5s cubic-bezier(.2,.7,.25,1) both;white-space:nowrap}.intro-word:nth-child(2){animation-delay:2.95s}.intro-word:nth-child(3){animation-delay:3.4s}
 .intro-logo-shine{transform:translateX(-240px) skewX(-15deg);opacity:0;animation:ehkam-logo-shine .85s 4s ease-in-out both}
 @keyframes ehkam-logo-arrive{from{opacity:0;transform:translate(-50%,calc(-50% + 12px)) scale(.94)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
@@ -191,9 +191,9 @@
 @keyframes ehkam-name-arrive{from{opacity:0;transform:translateX(16px);filter:blur(3px)}to{opacity:1;transform:translateX(0);filter:blur(0)}}
 @keyframes ehkam-logo-shine{0%{opacity:0;transform:translateX(-240px) skewX(-15deg)}15%{opacity:.75}85%{opacity:.75}100%{opacity:0;transform:translateX(500px) skewX(-15deg)}}
 @keyframes ehkam-intro-exit{to{opacity:0;visibility:hidden;pointer-events:none}}
-@keyframes ehkam-logo-position{from{left:50%;top:50%}to{left:var(--logo-final-left,calc(100% - var(--logo-width)/2));top:var(--logo-final-top,50%)}}
-@media(max-width:900px){.intro-lockup{--logo-width:clamp(190px,60vw,270px);--logo-final-top:38%;--logo-final-left:50%;width:min(92vw,540px);height:clamp(230px,42svh,320px)}.intro-logo{top:38%}.intro-name{top:calc(38% + var(--logo-width)*.306 + 34px);width:100%;gap:8px;font-size:clamp(24px,6.2vw,32px);line-height:1.45}}
-@media(max-height:480px) and (orientation:landscape){.intro-lockup{--logo-width:clamp(150px,28vw,220px);--logo-final-top:50%;--logo-final-left:calc(100% - var(--logo-width)/2);width:min(94vw,800px);height:min(70dvh,250px)}.intro-logo{top:50%}.intro-name{top:50%;width:calc(100% - var(--logo-width) - 20px);font-size:clamp(22px,4vw,32px)}}
+@keyframes ehkam-logo-position{from{left:50%;top:50%}to{left:var(--logo-final-left,calc(var(--logo-width)/2));top:var(--logo-final-top,50%)}}
+@media(max-width:900px){.intro-lockup{--logo-width:clamp(108px,34vw,180px);--logo-gap:18px;--logo-final-top:50%;--logo-final-left:calc(var(--logo-width)/2);width:min(92vw,540px);height:260px}.intro-name{left:calc(var(--logo-width) + var(--logo-gap));top:50%;width:calc(100% - var(--logo-width) - var(--logo-gap));flex-direction:column;align-items:flex-start;gap:2px;font-size:clamp(24px,6.4vw,34px);line-height:1.4;text-align:left}}
+@media(max-height:480px) and (orientation:landscape){.intro-lockup{--logo-width:clamp(150px,28vw,220px);--logo-final-top:50%;--logo-final-left:calc(var(--logo-width)/2);width:min(94vw,800px);height:min(70dvh,250px)}.intro-logo{top:50%}.intro-name{top:50%;flex-direction:row;align-items:center;width:calc(100% - var(--logo-width) - var(--logo-gap));font-size:clamp(22px,3.5vw,32px)}}
 @media(prefers-reduced-motion:reduce){.ehkam-intro{animation:ehkam-intro-exit .01s 1.09s forwards}.intro-logo,.intro-face,.intro-face-eye,.intro-face-smile,.intro-name,.intro-word,.intro-logo-shine{animation:none}.intro-face-smile{stroke-dashoffset:0}.intro-logo-shine{display:none}}
 @media print{.ehkam-intro{display:none!important}}
 

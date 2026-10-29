@@ -1,5 +1,6 @@
 """Small internal recruitment, appraisal and training workflows; no external sync."""
 import json
+import secrets
 import re
 import permissions
 
@@ -23,7 +24,10 @@ def handle(h,c,u,path,method,core):
         if method=='POST':
             d=h.input();company=int(d['company_id']);title=str(d.get('title','')).strip();closes=core.normalize_date(d.get('closes_on'))
             if not title or len(title)>150 or not closes or closes<core.TODAY().isoformat() or not c.execute('SELECT 1 FROM companies WHERE id=? AND archived=0',(company,)).fetchone():core.fail('راجع الوظيفة والشركة وموعد الإغلاق')
-            cur=c.execute('INSERT INTO vacancies(company_id,title,department,closes_on,status,created_by,created_at) VALUES(?,?,?,?,"open",?,?)',(company,title,str(d.get('department',''))[:150],closes,u['id'],core.now()));core.record(c,u,'vacancy_create','company',company,cur.lastrowid);c.commit();return reply({'id':cur.lastrowid},201)
+            permissions.company(c,u,company,core)
+            retention=core.normalize_date(d.get('retention_until'))
+            if retention and retention<closes:core.fail('نهاية حفظ بيانات المتقدمين يجب ألا تسبق الإغلاق')
+            cur=c.execute('INSERT INTO vacancies(company_id,title,department,closes_on,status,created_by,created_at) VALUES(?,?,?,?,"open",?,?)',(company,title,str(d.get('department',''))[:150],closes,u['id'],core.now()));c.execute('UPDATE vacancies SET public_token=?,job_name=?,retention_until=? WHERE id=?',(secrets.token_urlsafe(24),str(d.get('job_name',''))[:150],retention,cur.lastrowid));core.record(c,u,'vacancy_create','company',company,cur.lastrowid);c.commit();return reply({'id':cur.lastrowid},201)
         return reply(permissions.filter_rows(c,u,c.execute('SELECT v.*,co.name company_name FROM vacancies v JOIN companies co ON co.id=v.company_id ORDER BY v.id DESC')))
     if path=='/api/candidates':
         admin()
@@ -35,7 +39,7 @@ def handle(h,c,u,path,method,core):
             if not consent or consent>core.TODAY().isoformat() or not retention or retention<core.TODAY().isoformat():core.fail('تاريخ الموافقة ومدة الاحتفاظ مطلوبان')
             if c.execute('SELECT 1 FROM candidates WHERE vacancy_id=? AND lower(email)=lower(?)',(vid,email)).fetchone():core.fail('المرشح مسجل لهذه الوظيفة')
             cur=c.execute('INSERT INTO candidates(vacancy_id,name,email,phone,status,note,consent_on,retention_until,created_by,created_at) VALUES(?,?,?,?,"applied",?,?,?,?,?)',(vid,name,email,phone,str(d.get('note',''))[:2000],consent,retention,u['id'],core.now()));core.record(c,u,'candidate_create','company',job['company_id'],{'candidate_id':cur.lastrowid});c.commit();return reply({'id':cur.lastrowid},201)
-        return reply(permissions.filter_rows(c,u,c.execute('SELECT a.*,v.title vacancy,v.company_id FROM candidates a JOIN vacancies v ON v.id=a.vacancy_id ORDER BY a.id DESC')))
+        return reply(permissions.filter_rows(c,u,c.execute('SELECT a.id,a.vacancy_id,a.name,a.email,a.phone,a.status,a.note,a.priority,a.cv_name,a.probation_start,a.probation_employee_id,a.probation_confirmed_at,a.consent_on,a.retention_until,a.created_at,v.title vacancy,v.company_id FROM candidates a JOIN vacancies v ON v.id=a.vacancy_id ORDER BY a.priority,a.id DESC')))
     if re.fullmatch('/api/candidates/[0-9]+',path) and method=='POST':
         admin();d=h.input();cid=int(path.rsplit('/',1)[1]);row=c.execute('SELECT a.*,v.company_id FROM candidates a JOIN vacancies v ON v.id=a.vacancy_id WHERE a.id=?',(cid,)).fetchone();status=d.get('status');note=str(d.get('note','')).strip()
         if row:permissions.company(c,u,row['company_id'],core)

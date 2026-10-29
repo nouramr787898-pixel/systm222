@@ -62,7 +62,7 @@ def handle(h,c,u,path,method,core):
         if errors:return reply({'errors':errors},409)
         accounts=[]
         for d in rows:
-            number=c.execute('UPDATE employee_number_sequence SET value=value+1 WHERE id=1 RETURNING value').fetchone()[0];d['employee_no']=f'EH-{number:04d}'
+            d['employee_no']=core.requested_batch.next_number(c,preview['company_id'])
             keys=[k for k in d if k!='username'];cur=c.execute('INSERT INTO employees('+','.join(keys)+') VALUES('+','.join('?' for _ in keys)+')',[d[k] for k in keys]);eid=cur.lastrowid
             password=secrets.token_urlsafe(18)
             c.execute('INSERT INTO users(username,password_hash,role,employee_id,company_id,display_name,must_change_password) VALUES(?,?,"employee",?,?,?,0)',(d['username'],core.hashpw(password),eid,d['company_id'],d['name']))

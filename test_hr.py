@@ -62,7 +62,7 @@ class HRTests(unittest.TestCase):
     def test_contract_end_cap_and_month_end_anniversary(self):
         server.TODAY=lambda:dt.date(2028,10,27)
         self.assertEqual(self.employee('leave/2')[1]['accrued'],0)
-        self.assertEqual(self.employee('leave/2')[1]['carryover'],46)
+        self.assertEqual(self.employee('leave/2')[1]['carryover'],44.25)  # Preserve cutover + complete calendar months; no final partial month.
         self.assertEqual(server.months_elapsed('2026-01-31',dt.date(2026,2,28)),1)
 
     def test_absence_approval_actual_month_salary_and_correction_reversal(self):
@@ -123,7 +123,7 @@ class HRTests(unittest.TestCase):
         rid=self.create('permission',start_date='01/11/2026',end_date='01/11/2026',time_from='10:00',time_to='11:30')
         self.assertEqual(self.request(rid)['details']['minutes'],90)
         self.assertEqual(self.employee('requests',{'type':'sick_leave','notes':'نص فقط','start_date':'01/11/2026','end_date':'01/11/2026'})[0],400)
-        rid=self.create('investigation',title='تحقيق',incident_description='وصف',incident_date='25/10/2026',parties='أطراف')
+        rid=self.create('investigation',title='تحقيق',incident_description='وصف',incident_date='25/10/2026',parties='2')
         self.assertEqual(self.manager(f'requests/{rid}',{'status':'approved'})[0],403)
         self.assertEqual(self.admin(f'requests/{rid}',{'status':'approved'})[0],200)
 
@@ -215,8 +215,8 @@ class HRTests(unittest.TestCase):
     def test_hr_migration_backup_and_repeatability(self):
         rid=self.create()
         with server.conn() as c:
-            for table in ['email_outbox','employee_files','overtime_reviews','notifications','request_comments','settlements','absences','contracts','schedules','work_sites','holidays']:c.execute('DROP TABLE '+table)
-            c.execute("DELETE FROM schema_migrations WHERE version='hr-v2'")
+            for table in ['leave_accrual_cutover','email_outbox','employee_files','overtime_reviews','notifications','request_comments','settlements','absences','contracts','schedules','work_sites','holidays']:c.execute('DROP TABLE '+table)
+            c.execute("DELETE FROM schema_migrations WHERE version IN ('hr-v2','leave-calendar-cutover-v1')")
         server.init()
         backup=server.DB.with_name(server.DB.name+'.before-hr-v2.bak')
         self.assertTrue(backup.exists())
@@ -260,11 +260,11 @@ class HRTests(unittest.TestCase):
         import urllib.request
         with urllib.request.urlopen(self.base+'health') as response:result=json.load(response)
         self.assertEqual(result['status'],'ok')
-        self.assertEqual(result['release'],'professional-v1')
+        self.assertEqual(result['release'],'requested-branches-v1')
         self.assertEqual(set(result),{'status','release','database','commit'})
 
     def test_otp_email_or_phone_with_mocked_providers(self):
-        self.assertEqual(self.admin('employees/2',{'email':'demo@example.test','phone_country':'+966','phone_local':'501234567'})[0],200)
+        self.assertEqual(self.admin('employees/2',{'email':'demo@example.test','phone_country':'+966','phone_local':'0501234567'})[0],200)
         captured=[]
         with patch.object(server,'resend_send_reset',side_effect=lambda dest,code:captured.append(code) or True):
             self.assertEqual(self.employee('password/request',{'username':'employee','channel':'email'})[0],200)

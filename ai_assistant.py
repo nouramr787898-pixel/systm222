@@ -161,6 +161,29 @@ def generate(question,data,history=None):
     return {'answer':'أنا مساعد إحكام الإرشادي المحلي. أقدر أشرح الطلبات والإجازات والبصمة والنقل والرواتب والإشعارات وأمان الحساب والتوظيف، وأعرض إحصاءات الطلبات المتاحة لحسابك. اكتب سؤالًا محددًا، زي «إزاي أنقل موظف؟» أو «كام طلب معتمد عندي؟». الحوار الحر وقراءة المستندات والبيانات الشخصية غير مدعومين.','sources':['نطاق مساعد إحكام الإرشادي']}
 
 
+def saudi(text):
+    for old,new in [('إزاي','كيف'),('ازاي','كيف'),('كام','كم'),('دلوقتي','الحين'),('عايز','تبي'),('عاوز','تبي'),('ما تجمعهمش','لا تجمعهم'),('مش ','مو '),('ده مثال','هذا مثال'),('زي «','مثل «'),('اختار','اختر'),('ما تقدرش','ما تقدر'),(' دي ',' هذي '),('الصيغة دي','هالصيغة'),('بيتحسب','ينحسب'),('النهارده','اليوم'),('اكتر','أكثر'),('علشان','عشان'),('مفيش','ما فيه')]:text=text.replace(old,new)
+    return text
+
+
+def attendance_answer(c,u,question,core):
+    q=normalize(question)
+    if u['role']!='manager' or not contains(q,('فين','وين','حاضر','غايب','غائب','حضور')):return None
+    visible=[e for e in core.visible_employees(c,u) if e['id']!=u['employee_id']]
+    matches=[e for e in visible if any(len(word)>1 and normalize(word) in q.split() for word in e['name'].split()) or normalize(e['employee_no']) in q]
+    exact=[e for e in matches if normalize(e['name']) in q or normalize(e['employee_no']) in q]
+    if exact:matches=exact
+    if not matches:return {'answer':'ما لقيت موظفًا بهذا الاسم ضمن الموظفين المسموح لك بالاطلاع عليهم. اكتب الاسم الكامل أو الرقم الوظيفي.','sources':['نطاق فريق المشرف']}
+    if len(matches)>1:return {'answer':'أبشر، فيه أكثر من موظف بهذا الاسم ضمن فريقك: '+'، '.join(e['name']+' ('+e['employee_no']+')' for e in matches)+'. حدّد الاسم الكامل أو الرقم الوظيفي.','sources':['الموظفون ضمن صلاحيات المشرف']}
+    e=matches[0];day=core.TODAY().isoformat()
+    record=c.execute('SELECT check_in,check_out FROM attendance WHERE employee_id=? AND day=?',(e['id'],day)).fetchone()
+    if record and record['check_in']:state='حاضر اليوم، سجّل الحضور الساعة '+record['check_in']+(' والانصراف الساعة '+record['check_out'] if record['check_out'] else '، وما سجّل انصراف إلى الآن')
+    elif c.execute("SELECT 1 FROM absences WHERE employee_id=? AND day=? AND status='approved'",(e['id'],day)).fetchone():state='عليه غياب معتمد اليوم'
+    elif c.execute("SELECT 1 FROM requests WHERE employee_id=? AND status='approved' AND type IN ('annual_leave','sick_leave','unpaid_leave') AND start_date<=? AND end_date>=?",(e['id'],day,day)).fetchone():state='عنده إجازة معتمدة اليوم'
+    elif core.hr.holiday(c,e,day) or str(core.TODAY().weekday()) not in e['workweek'].split(','):state='اليوم راحة أو عطلة حسب جدوله'
+    else:state='ما سجّل حضور اليوم؛ هذا ما يثبت غيابًا معتمدًا، راجع الدوام والإجازات'
+    return {'answer':'أبشر، '+e['name']+' '+state+'.','sources':['سجل الحضور والإجازات ضمن صلاحيات المشرف — '+day]}
+
 def handle(h,c,u,path,method,core):
     if path!='/api/assistant':return False
     if method=='GET':
@@ -172,7 +195,8 @@ def handle(h,c,u,path,method,core):
     acquire(u['id'],core)
     try:
         reserve(u['id'],core)
-        result=generate(question.strip(),context(c,u,core),history)
+        result=attendance_answer(c,u,question.strip(),core) or generate(question.strip(),context(c,u,core),history)
+        result['answer']=saudi(result['answer'])
         core.record(c,u,'assistant_answer','user',u['id'],{'mode':'local_guidance','question_length':len(question)})
         c.commit()
     finally:

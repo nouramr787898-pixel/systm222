@@ -167,7 +167,7 @@ class ProfessionalTests(unittest.TestCase):
             self.assertEqual(c.execute('PRAGMA foreign_key_check').fetchall(),[])
 
     def test_import_preview_atomic_commit_and_admin_managed_password(self):
-        body={'company_id':1,'csv':'name,username,basic,phone_local\nImport Test,import_user,4500,501234567\n'}
+        body={'company_id':1,'csv':'name,username,basic,phone_local\nImport Test,import_user,4500,0501234567\n'}
         status,preview=self.admin('import/preview',body);self.assertEqual(status,200);self.assertEqual(preview['errors'],[])
         status,result=self.admin('import/commit',{'token':preview['token']});self.assertEqual(status,201,result)
         account=result['accounts'][0];person=self.client(account['username'],account['temporary_password'],'employee')

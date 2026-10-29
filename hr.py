@@ -68,7 +68,7 @@ def employment_end(c,e):
     return end
 
 
-def leave(c,e,core,asof=None):
+def legacy_leave(c,e,core,asof=None):
     today=asof or core.TODAY()
     end=employment_end(c,e)
     until=min(today,dt.date.fromisoformat(end)) if end else today
@@ -102,6 +102,33 @@ def leave(c,e,core,asof=None):
             'elapsed_months':elapsed,'monthly_history':history,'expired_contract_accrual':expired_accrual}
 
 
+def leave(c,e,core,asof=None):
+    today=asof or core.TODAY()
+    old=legacy_leave(c,e,core,asof)
+    cutoff=c.execute('SELECT * FROM leave_accrual_cutover WHERE contract_id=?',(old['contract_id'],)).fetchone()
+    # Historical queries retain their former calculation before the change date.
+    if cutoff and today.isoformat()<cutoff['effective_on']:return old
+    end=employment_end(c,e);until=min(today,dt.date.fromisoformat(end)) if end else today
+    history=json.loads(cutoff['history']) if cutoff else []
+    accrued=float(cutoff['accrued']) if cutoff else 0
+    if e['contract_start']:
+        start=dt.date.fromisoformat(e['contract_start'])
+        cursor=dt.date.fromisoformat(cutoff['effective_on']).replace(day=1) if cutoff else start.replace(day=1)
+        while cursor<=until:
+            grant_on=cursor.replace(day=calendar.monthrange(cursor.year,cursor.month)[1])
+            if grant_on>until:break
+            if any(row['date'][:7]==grant_on.isoformat()[:7] for row in history):
+                cursor=(cursor.replace(day=28)+dt.timedelta(days=4)).replace(day=1);continue
+            terms=workforce.terms_at(c,e,grant_on.isoformat());grant=float(terms['annual_entitlement'])/12
+            accrued+=grant;history.append({'date':grant_on.isoformat(),'days':round(grant,4)})
+            cursor=(cursor.replace(day=28)+dt.timedelta(days=4)).replace(day=1)
+    expired=bool(end and today.isoformat()>=end);earned=round(accrued,4)
+    carry=float(e['carryover'])+(earned if expired else 0)
+    deductions=old['approved_used']+old['absence_used']+old['settled_days']
+    monthly_visible=(float(e['annual_entitlement'])/12 if today.day==calendar.monthrange(today.year,today.month)[1] and (not end or end>=today.isoformat()) else 0)
+    return {**old,'carryover':carry,'accrued':0 if expired else earned,'available':round(carry+(0 if expired else earned)-deductions,4),'monthly_allowance':round(monthly_visible,4),'monthly_history':history,'elapsed_months':len(history),'expired_contract_accrual':earned if expired else 0,'accrual_policy':'complete-calendar-month-end','historical_cutover':cutoff['effective_on'] if cutoff else None}
+
+
 def holiday(c,e,day):
     return bool(c.execute('SELECT 1 FROM holidays WHERE company_id=? AND start_date<=? AND end_date>=?',(e['company_id'],day,day)).fetchone())
 
@@ -121,6 +148,15 @@ def details(c,u,e,d,core):
         out['last_day_fraction']=fraction
     if kind=='investigation':
         if not out['incident_description']:core.fail('وصف الواقعة مطلوب')
+        if out['parties']:
+            ids=[int(x) for x in out['parties'].split(',') if x.strip().isdigit()]
+            if not ids or len(ids)!=len(out['parties'].split(',')):core.fail('اختر الأطراف من قائمة الموظفين')
+            parties=[]
+            for eid in ids:
+                person=c.execute('SELECT name FROM employees WHERE id=? AND company_id=? AND archived=0',(eid,e['company_id'])).fetchone()
+                if not person:core.fail('الأطراف يجب أن تكون من نفس الشركة')
+                parties.append(person['name'])
+            out['party_ids']=ids;out['parties']='، '.join(parties)
         out['incident_date']=core.normalize_date(d.get('incident_date'))
         if not out['incident_date']:core.fail('تاريخ الواقعة مطلوب')
     if kind=='sick_leave' and not d.get('attachments'):core.fail('المستند الطبي إلزامي للإجازة المرضية')
@@ -338,7 +374,7 @@ def handle(h,c,u,path,method,core):
             if not core.business_days(e,b,b,c):core.fail('آخر يوم جزئي يجب أن يكون يوم عمل')
             days=days-1+fraction
         balance=leave(c,e,core)
-        monthly_available=balance['monthly']
+        monthly_available=balance['accrued']
         return respond({'days':days,'monthly_available':monthly_available,'monthly_after_approval':round(max(0,monthly_available-days),4),'available':balance['available'],'after_approval':round(balance['available']-days,4)})
     if path=='/api/contracts' and method=='GET':
         e=employee();return respond([dict(r) for r in c.execute('SELECT * FROM contracts WHERE employee_id=? ORDER BY id',(e['id'],))])

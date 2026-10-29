@@ -1,4 +1,5 @@
 """EHKAM HR Portal - local functional prototype. Run: python server.py"""
+import requested_batch
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import ai_assistant, hr, sys, calendar, gps_location, security, workforce, payroll, talent, directory_tools, permissions, ui_workflows
@@ -89,6 +90,13 @@ def init(seeder=None,allow_create=False):
     if backup.exists():raise RuntimeError('Professional migration backup exists; verify before retrying')
     with sqlite3.connect(backup) as target:existing.backup(target)
     os.chmod(backup,0o600)
+ if DB.exists():
+  with conn() as existing:
+   if existing.execute("SELECT 1 FROM sqlite_master WHERE name='schema_migrations'").fetchone() and not existing.execute('SELECT 1 FROM schema_migrations WHERE version=?',(requested_batch.VERSION,)).fetchone():
+    backup=DB.with_name(DB.name+'.before-'+requested_batch.VERSION+'.bak')
+    if backup.exists():raise RuntimeError('Requested migration backup exists; verify before retrying')
+    with sqlite3.connect(backup) as target:existing.backup(target)
+    os.chmod(backup,0o600)
  c=conn(allow_create=allow_create);c.executescript('''
  CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL, name_en TEXT DEFAULT '',contract_end TEXT,city TEXT DEFAULT '', address TEXT DEFAULT '', latitude REAL, longitude REAL, geofence_radius REAL NOT NULL DEFAULT 100, archived INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','manager','employee')),employee_id INTEGER,company_id INTEGER);
@@ -117,7 +125,7 @@ def init(seeder=None,allow_create=False):
  if not c.in_transaction:c.execute('BEGIN IMMEDIATE')
  migrate_workflow(c)
  hr.migrate(c)
- workforce.migrate(c);security.migrate(c);payroll.migrate(c);talent.migrate(c);directory_tools.migrate(c);permissions.migrate(c)
+ workforce.migrate(c);security.migrate(c);payroll.migrate(c);talent.migrate(c);directory_tools.migrate(c);permissions.migrate(c);requested_batch.migrate(c);requested_batch.capture_leave_cutover(c,sys.modules[__name__])
  c.commit();c.close()
 
 def migrate_workflow(c):
@@ -305,10 +313,11 @@ def authevo_verify(phone,code):
  return (result.get('data') or {}).get('verified') is True
 
 def clean_contacts(d):
- country=str(d.get('phone_country') or '+966');local=re.sub(r'[^0-9]','',str(d.get('phone_local') or ''))
+ country=str(d.get('phone_country') or '+966');raw=str(d.get('phone_local') or '')
  if country != '+966':fail('النظام مخصص للسعودية؛ رمز الدولة +966')
- if local.startswith('0'):local=local[1:]
- if local and not re.fullmatch(r'5[0-9]{8}',local):fail('يرجى إدخال رقم جوال صحيح')
+ if raw and not re.fullmatch(r'05[0-9]{8}',raw):
+  if not (raw==d.get('_legacy_phone') and re.fullmatch(r'5[0-9]{8}',raw)):fail('رقم الجوال يجب أن يكون 10 أرقام ويبدأ بـ05')
+ local=raw[1:] if raw.startswith('0') else raw
  email=str(d.get('email') or '').strip().lower()
  if email and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):fail('البريد الإلكتروني غير صحيح')
  return country,local,email
@@ -396,7 +405,7 @@ def leave(c,e):
  return hr.leave(c,e,sys.modules[__name__])
 
 def visible_employees(c,u,include_archived=False):
- q='SELECT e.*,c.name company_name,(SELECT name FROM employees m WHERE m.id=e.manager_id) manager_name,(e.basic+e.housing+e.transport+e.other) gross_salary FROM employees e JOIN companies c ON c.id=e.company_id WHERE c.archived=0'
+ q="SELECT e.*,(SELECT username FROM users WHERE employee_id=e.id AND role IN ('employee','manager') LIMIT 1) login_username,c.name company_name,(SELECT name FROM employees m WHERE m.id=e.manager_id) manager_name,(e.basic+e.housing+e.transport+e.other) gross_salary FROM employees e JOIN companies c ON c.id=e.company_id WHERE c.archived=0"
  p=[]
  if u['role']=='admin' and include_archived:q=q.replace('WHERE c.archived=0','WHERE 1=1')
  if not include_archived:q+=' AND e.archived=0'
@@ -576,7 +585,7 @@ class Handler(BaseHTTPRequestHandler):
    try:
     health=sqlite3.connect(DB.resolve().as_uri()+'?mode=ro',uri=True)
     try:
-     ready=health.execute("SELECT 1 FROM schema_migrations WHERE version='professional-v1'").fetchone()
+     ready=health.execute("SELECT 1 FROM schema_migrations WHERE version='requested-branches-v1'").fetchone()
      health.execute('SELECT 1 FROM users LIMIT 1').fetchone()
      expected=os.environ.get('EHKAM_DB_ID','').strip()
      if expected:
@@ -585,8 +594,13 @@ class Handler(BaseHTTPRequestHandler):
     finally:health.close()
     if not ready:raise RuntimeError('schema_not_ready')
     revision=os.environ.get('RAILWAY_GIT_COMMIT_SHA','')
-    return self.write({'status':'ok','release':'professional-v1','database':'ok','commit':revision if re.fullmatch(r'[0-9a-fA-F]{40}',revision) else None})
-   except (sqlite3.Error,RuntimeError):return self.write({'status':'unavailable','release':'professional-v1'},503)
+    return self.write({'status':'ok','release':requested_batch.VERSION,'database':'ok','commit':revision if re.fullmatch(r'[0-9a-fA-F]{40}',revision) else None})
+   except (sqlite3.Error,RuntimeError):return self.write({'status':'unavailable','release':requested_batch.VERSION},503)
+  if method=='GET' and path.startswith('/apply/'):
+   return self.write((BASE/'apply.html').read_bytes(),ctype='text/html')
+  if method=='GET' and path in ('/leaflet.js','/leaflet.css'):
+   return self.write((BASE/path.lstrip('/')).read_bytes(),ctype='text/css' if path.endswith('.css') else 'text/javascript')
+  if method=='GET' and path=='/requested-ui.js':return self.write((BASE/'requested-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path in ('/','/index.html'):
    return self.write((BASE/'index.html').read_bytes(),ctype='text/html')
   if method=='GET' and path=='/style.css':return self.write((BASE/'style.css').read_bytes(),ctype='text/css')
@@ -603,6 +617,7 @@ class Handler(BaseHTTPRequestHandler):
   c=conn()
   try:
    if method=='POST':security.same_origin(self,sys.modules[__name__])
+   if requested_batch.public(self,c,path,method,sys.modules[__name__]):return
    if method=='POST' and path=='/api/login':
     d=self.input();username=str(d.get('username','')).strip()[:128];security.attempt(c,username,security.peer(self),sys.modules[__name__]);u=c.execute('SELECT * FROM users WHERE username=?',(username,)).fetchone()
     if not u or not verifypw(str(d.get('password',''))[:128],u['password_hash']) or u['role']!=d.get('account_role'):
@@ -737,6 +752,8 @@ class Handler(BaseHTTPRequestHandler):
    u=self.actor(c)
    permissions.guard(self,c,u,path,method,sys.modules[__name__])
    if u['must_change_password'] and u['role']!='employee' and path not in ('/api/me','/api/security/password','/api/security/sessions','/api/logout'):fail('غيّر كلمة المرور المؤقتة من أمان الحساب أولًا',403)
+   requested_batch.probation_sync(c,sys.modules[__name__]);c.commit()
+   if requested_batch.handle(self,c,u,path,method,sys.modules[__name__]):return
    if ai_assistant.handle(self,c,u,path,method,sys.modules[__name__]):return
    if ui_workflows.handle(self,c,u,path,method,sys.modules[__name__]):return
    if directory_tools.handle(self,c,u,path,method,sys.modules[__name__]):return
@@ -793,6 +810,10 @@ class Handler(BaseHTTPRequestHandler):
      if not changed.rowcount:fail('الشركة غير موجودة',404)
      record(c,u,'update','company',cid,name);c.commit();return self.write({'ok':True})
     cursor=c.execute('INSERT INTO companies(name,name_en,contract_end,city,address,latitude,longitude,geofence_radius,gps_url) VALUES(?,?,?,?,?,?,?,?,?)',(name,d.get('name_en',''),normalize_date(d.get('contract_end')),d.get('city',''),d.get('address',''),lat,lon,radius,gps))
+    if d.get('employee_prefix'):
+     prefix=str(d['employee_prefix']).strip()
+     if not re.fullmatch(r'[A-Za-zأ-ي]{1,12}[-_]?',prefix) or c.execute('SELECT 1 FROM companies WHERE employee_prefix=?',(prefix,)).fetchone():fail('حروف الشركة غير صالحة أو مستخدمة')
+     c.execute('UPDATE companies SET employee_prefix=? WHERE id=?',(prefix,cursor.lastrowid))
     record(c,u,'create','company',cursor.lastrowid,name);c.commit();return self.write({'ok':True},201)
    if path=='/api/employees' and method=='GET':return self.write(visible_employees(c,u,True))
    if path=='/api/employees' and method=='POST':
@@ -800,8 +821,7 @@ class Handler(BaseHTTPRequestHandler):
     d=normalize_employee_fields(self.input());co=int(d.get('company_id',0));c.execute('BEGIN IMMEDIATE');exists=c.execute('SELECT id FROM companies WHERE id=? AND archived=0',(co,)).fetchone()
     if not exists:fail('الشركة غير موجودة')
     if not str(d.get('name','')).strip():fail('الاسم مطلوب')
-    number=c.execute('UPDATE employee_number_sequence SET value=value+1 WHERE id=1 RETURNING value').fetchone()[0]
-    d['employee_no']=f'EH-{number:04d}'
+    d['employee_no']=requested_batch.next_number(c,co)
     country,phone,email=clean_contacts(d)
     username=str(d.get('username') or d['name']).strip();newpw=str(d.get('login_password',''))
     if not username or len(username)>128 or any(ord(ch)<32 for ch in username) or len(newpw)<10 or len(newpw)>128:fail('اسم موظف صالح لا يتجاوز 128 حرفًا وكلمة مرور 10–128 حرفًا مطلوبان')
@@ -817,7 +837,14 @@ class Handler(BaseHTTPRequestHandler):
     except sqlite3.IntegrityError:fail('رقم الموظف مستخدم داخل هذه الشركة')
     if d.get('login_role','employee') not in ('employee','manager'):fail('نوع الحساب غير صالح')
     c.execute('INSERT INTO users(username,password_hash,role,employee_id,company_id) VALUES(?,?,?,?,?)',(username,hashpw(newpw),d.get('login_role','employee'),cur.lastrowid,co))
+    if d.get('asset_name') or d.get('asset_serial'):
+     asset_name=str(d.get('asset_name','')).strip();asset_serial=str(d.get('asset_serial','')).strip()
+     if not asset_name or not asset_serial or max(len(asset_name),len(asset_serial))>200:fail('اسم العهدة ورقمها مطلوبان معًا')
+     if c.execute('SELECT 1 FROM employee_assets WHERE serial=? AND returned_on IS NULL',(asset_serial,)).fetchone():fail('العهدة مسلمة بالفعل')
+     c.execute("INSERT INTO employee_assets(employee_id,name,serial,issued_on,note,created_by,receipt_status) VALUES(?,?,?,?,?,?,'pending')",(cur.lastrowid,asset_name,asset_serial,TODAY().isoformat(),'',u['id']))
     hr.ensure_contract(c,c.execute('SELECT * FROM employees WHERE id=?',(cur.lastrowid,)).fetchone())
+    if d.get('candidate_id'):
+     requested_batch.start_probation(c,u,c.execute('SELECT * FROM employees WHERE id=?',(cur.lastrowid,)).fetchone(),int(d['candidate_id']),normalize_date(d.get('probation_start')) or TODAY().isoformat(),sys.modules[__name__])
     c.execute('UPDATE users SET display_name=? WHERE employee_id=?',(d['name'],cur.lastrowid))
     record(c,u,'create','employee',cur.lastrowid,d['name']);c.commit();return self.write({'id':cur.lastrowid,'employee_no':d['employee_no']},201)
    if path.startswith('/api/employees/') and method=='POST':
@@ -825,7 +852,7 @@ class Handler(BaseHTTPRequestHandler):
     eid=int(path.rsplit('/',1)[1]);e=user_allowed_emp(c,u,eid);d=normalize_employee_fields(self.input())
     permitted={'passport','nationality','birth_date','qualification','specialization','branch','iban','bank_name','phone_country','phone_local','email','schedule_id','site_id','photo','name','name_en','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method'}
     if any(key in d for key in ('phone_country','phone_local','email')):
-     country,phone,email=clean_contacts({**dict(e),**d});d.update(phone_country=country,phone_local=phone,email=email)
+     country,phone,email=clean_contacts({**dict(e),**d,'_legacy_phone':e['phone_local']});d.update(phone_country=country,phone_local=phone,email=email)
     for field,table in [('schedule_id','schedules'),('site_id','work_sites')]:
      if field not in d:continue
      d[field]=int(d[field]) if d[field] else None
@@ -840,6 +867,7 @@ class Handler(BaseHTTPRequestHandler):
     if 'photo' in changes:
      photo=changes['photo']
      if photo is not None and (not isinstance(photo,str) or len(photo)>300000 or not photo.startswith(('data:image/png;base64,','data:image/jpeg;base64,','data:image/webp;base64,'))):fail('صيغة الصورة غير مقبولة أو حجمها كبير')
+    if 'manager_id' in changes and str(changes['manager_id'] or '')!=str(e['manager_id'] or '') and c.execute("SELECT 1 FROM supervisor_tasks WHERE employee_id=? AND status!='approved'",(eid,)).fetchone():fail('اعتمد مهام المشرف المعلقة قبل تغيير المشرف المباشر',409)
     if changes.get('manager_id'):
      m=c.execute("SELECT e.company_id FROM employees e JOIN users u ON u.employee_id=e.id AND u.role='manager' AND u.company_id=e.company_id WHERE e.id=?",(changes['manager_id'],)).fetchone()
      if int(changes['manager_id'])==eid or not m or m['company_id']!=e['company_id']:fail('المشرف يجب أن يتبع نفس الشركة')
@@ -994,6 +1022,7 @@ class Handler(BaseHTTPRequestHandler):
      correction=json.loads(r['details']).get('correction_type','both')
      check_in=e['work_start'] if correction in ('check_in','both') else None
      check_out=e['work_end'] if correction in ('check_out','both') else None
+     if check_out:requested_batch.checkout_guard(c,e['id'],r['start_date'],sys.modules[__name__])
      c.execute("INSERT INTO attendance(employee_id,day,check_in,check_out,source) VALUES(?,?,?,?,?) ON CONFLICT(employee_id,day) DO UPDATE SET check_in=COALESCE(attendance.check_in,excluded.check_in),check_out=COALESCE(attendance.check_out,excluded.check_out),source=excluded.source",(e['id'],r['start_date'],check_in,check_out,'approved_punch_fix'))
      if check_in:
       c.execute("UPDATE absences SET status='reversed',note=COALESCE(note,'') || ' | approved punch correction' WHERE employee_id=? AND day=? AND status='approved'",(e['id'],r['start_date']))
@@ -1057,6 +1086,7 @@ class Handler(BaseHTTPRequestHandler):
      action='check_in';message='تم تسجيل الحضور بنجاح'
     elif not row['check_out']:
      if explicit=='check_in':fail('الحضور مسجل بالفعل')
+     requested_batch.checkout_guard(c,e['id'],day,sys.modules[__name__])
      if row['check_in_at'] and (datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(row['check_in_at'])).total_seconds()<60:fail('راجع البصمة؛ لا يمكن تسجيل انصراف خلال دقيقة من الحضور')
      c.execute('UPDATE attendance SET check_out=?,source=?,check_out_at=? WHERE id=?',(stamp,'gps_geofence',now(),row['id']))
      action='check_out';message='تم تسجيل الانصراف بنجاح'
@@ -1077,6 +1107,10 @@ class Handler(BaseHTTPRequestHandler):
     if not verifypw(d['password'],full['password_hash']):fail('كلمة المرور غير صحيحة',403)
     table={'company':'companies','employee':'employees'}.get(target)
     if not table:fail('النوع غير صحيح')
+    if value:
+     asset_sql='SELECT a.name FROM employee_assets a JOIN employees e ON e.id=a.employee_id WHERE a.returned_on IS NULL AND '+('e.id=?' if target=='employee' else 'e.company_id=?')
+     pending_assets=c.execute(asset_sql,(eid,)).fetchall()
+     if pending_assets:fail('لا يمكن الأرشفة قبل إرجاع العهد: '+'، '.join(a[0] for a in pending_assets),409)
     cur=c.execute('UPDATE '+table+' SET archived=? WHERE id=?',(value,eid))
     if not cur.rowcount:fail('العنصر غير موجود',404)
     record(c,u,'archive' if value else 'restore',target,eid,'confirmed');c.commit();return self.write({'ok':True,'message':'تمت الأرشفة بنجاح' if value else 'تم الاسترجاع بنجاح'})

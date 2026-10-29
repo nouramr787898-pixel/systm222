@@ -129,7 +129,7 @@ class WorkflowTests(unittest.TestCase):
     def test_migration_preserves_old_data_and_is_repeatable(self):
         with server.conn() as c:
             c.execute('DROP INDEX employees_number_global')
-            for table in ['email_outbox','employee_files','overtime_reviews','notifications','request_comments','settlements','absences','contracts','schedules','work_sites','holidays','employee_number_history','employee_number_sequence','request_attachments','request_decisions','schema_migrations']:
+            for table in ['leave_accrual_cutover','email_outbox','employee_files','overtime_reviews','notifications','request_comments','settlements','absences','contracts','schedules','work_sites','holidays','employee_number_history','employee_number_sequence','request_attachments','request_decisions','schema_migrations']:
                 c.execute('DROP TABLE '+table)
             c.execute("UPDATE employees SET employee_no='OLD-' || id")
             c.execute("UPDATE employees SET employee_no=CASE id WHEN 1 THEN 'EH-0002' WHEN 2 THEN 'A-002' ELSE 'EH-0001' END")

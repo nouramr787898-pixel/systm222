@@ -70,7 +70,7 @@ def assert_open(c,eid,start,end,core):
 
 
 def calculate(c,e,month,core,company_id=None):
-    first,last=bounds(month);earned=Decimal('0');schedules=set()
+    first,last=bounds(month);earned=Decimal('0');allowances=Decimal('0');schedules=set()
     end=core.hr.employment_end(c,e)
     belongs=lambda day: company_id is None or workforce.terms_at(c,e,str(day))['company_id']==company_id
     for n in range((last-first).days+1):
@@ -80,6 +80,7 @@ def calculate(c,e,month,core,company_id=None):
         if end and day.isoformat()>end:continue
         gross=sum(Decimal(str(terms[k] or 0)) for k in ('basic','housing','transport','other'))
         earned+=gross/Decimal(calendar.monthrange(day.year,day.month)[1])
+        allowances+=sum(Decimal(str(terms[k] or 0)) for k in ('housing','transport','other'))/Decimal(calendar.monthrange(day.year,day.month)[1])
         schedules.add((terms['workweek'],terms['work_start'],terms['work_end']))
     earned_cents=cents(earned)
     absence=sum(cents(r['salary_deduction']) for r in c.execute("SELECT salary_deduction,day FROM absences WHERE employee_id=? AND status='approved' AND day BETWEEN ? AND ?",(e['id'],str(first),str(last))) if belongs(r['day']))
@@ -100,7 +101,7 @@ def calculate(c,e,month,core,company_id=None):
     loan_total=sum(x['amount_cents'] for x in loans)
     net=earned_cents+additions-absence-unpaid-deductions-loan_total
     if net<0:core.fail('صافي الموظف '+e['name']+' سالب؛ راجع الاستقطاعات قبل إعداد المسير')
-    return {'employee_id':e['id'],'employee_no':e['employee_no'],'name':e['name'],'company_id':company_id if company_id is not None else e['company_id'],'month':month,'currency':'SAR','earned_cents':earned_cents,'absence_cents':absence,'unpaid_cents':unpaid,'additions_cents':additions,'deductions_cents':deductions,'loan_cents':loan_total,'net_cents':net,'loans':loans,'adjustments':adjustments,'payment_method':e['payment_method'],'history_note':'Current values before first recorded change are a legacy baseline, not verified historical evidence.','statutory_note':'Only explicitly reviewed adjustments are included; no automatic tax, insurance or end-of-service entitlement.'}
+    return {'employee_id':e['id'],'employee_no':e['employee_no'],'name':e['name'],'company_id':company_id if company_id is not None else e['company_id'],'month':month,'currency':'SAR','earned_cents':earned_cents,'allowances_cents':cents(allowances),'absence_cents':absence,'unpaid_cents':unpaid,'additions_cents':additions,'deductions_cents':deductions,'loan_cents':loan_total,'net_cents':net,'loans':loans,'adjustments':adjustments,'payment_method':e['payment_method'],'history_note':'Current values before first recorded change are a legacy baseline, not verified historical evidence.','statutory_note':'Only explicitly reviewed adjustments are included; no automatic tax, insurance or end-of-service entitlement.'}
 
 
 def source(c,company,month,core):

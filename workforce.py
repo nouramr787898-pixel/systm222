@@ -123,6 +123,7 @@ def handle(h,c,u,path,method,core):
         if not e['contract_end'] or e['contract_end']>=today:core.fail('النقل بين جهات العمل يتم بعد إنهاء وتسوية العقد السابق')
         if c.execute("SELECT 1 FROM requests WHERE employee_id=? AND status IN ('new','review')",(e['id'],)).fetchone():core.fail('راجع الطلبات المعلقة قبل النقل')
         if c.execute('SELECT 1 FROM employees WHERE manager_id=? AND archived=0',(e['id'],)).fetchone():core.fail('أعد إسناد موظفي المشرف قبل نقله')
+        if c.execute("SELECT 1 FROM supervisor_tasks WHERE employee_id=? AND status!='approved'",(e['id'],)).fetchone():core.fail('اعتمد مهام المشرف المعلقة قبل نقل الموظف',409)
         if c.execute('SELECT 1 FROM employee_assets WHERE employee_id=? AND returned_on IS NULL',(e['id'],)).fetchone():core.fail('أغلق العهد القائمة قبل النقل')
         import payroll
         if payroll.commitments(c,e['id'])[0]>0:core.fail('سَوِّ السلف والالتزامات القائمة قبل النقل')
@@ -173,7 +174,7 @@ def handle(h,c,u,path,method,core):
             d=h.input();e=core.user_allowed_emp(c,u,int(d['employee_id']));name=str(d.get('name','')).strip();serial=str(d.get('serial','')).strip()
             if not name or not serial or max(len(name),len(serial))>200:core.fail('اسم العهدة ورقمها مطلوبان')
             if c.execute('SELECT 1 FROM employee_assets WHERE serial=? AND returned_on IS NULL',(serial,)).fetchone():core.fail('العهدة مسلمة بالفعل')
-            cur=c.execute('INSERT INTO employee_assets(employee_id,name,serial,issued_on,note,created_by) VALUES(?,?,?,?,?,?)',(e['id'],name,serial,core.TODAY().isoformat(),str(d.get('note',''))[:1000],u['id']));core.record(c,u,'asset_issue','employee',e['id'],name);c.commit();return reply({'id':cur.lastrowid},201)
+            cur=c.execute('INSERT INTO employee_assets(employee_id,name,serial,issued_on,note,created_by) VALUES(?,?,?,?,?,?)',(e['id'],name,serial,core.TODAY().isoformat(),str(d.get('note',''))[:1000],u['id']));c.execute("UPDATE employee_assets SET receipt_status='pending' WHERE id=?",(cur.lastrowid,));core.record(c,u,'asset_issue','employee',e['id'],name);c.commit();return reply({'id':cur.lastrowid},201)
         return reply(permissions.filter_rows(c,u,c.execute('SELECT a.*,e.name employee_name,e.company_id FROM employee_assets a JOIN employees e ON e.id=a.employee_id ORDER BY a.id DESC')))
     if re.fullmatch('/api/assets/[0-9]+/return',path) and method=='POST':
         admin();d=h.input();aid=int(path.split('/')[3]);note=str(d.get('note','')).strip()

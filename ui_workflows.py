@@ -116,7 +116,9 @@ def handle(h,c,u,path,method,core):
         return reply(request_progress(c,row,core))
     if path=='/api/action-items' and method=='GET':return reply(action_items(c,u,core))
     if path=='/api/notifications/unread' and method=='GET':
-        return reply({'count':len(action_items(c,u,core))})
+        assets=c.execute("SELECT COUNT(*) FROM employee_assets WHERE employee_id=? AND receipt_status='pending' AND returned_on IS NULL",(u['employee_id'],)).fetchone()[0] if u['role']=='employee' else 0
+        task_count=c.execute("SELECT COUNT(*) FROM supervisor_tasks WHERE employee_id=? AND status='assigned'",(u['employee_id'],)).fetchone()[0] if u['role']=='employee' else c.execute("SELECT COUNT(*) FROM supervisor_tasks WHERE supervisor_id=? AND status='submitted'",(u['id'],)).fetchone()[0] if u['role']=='manager' else 0
+        return reply({'count':len(action_items(c,u,core))+assets+task_count})
     if path=='/api/attendance-calendar' and method=='GET':
         e=core.user_allowed_emp(c,u,int(q.get('employee_id',[u['employee_id'] or 0])[0]))
         start=core.normalize_date(q.get('from',[core.TODAY().replace(day=1).isoformat()])[0]);end=core.normalize_date(q.get('to',[core.TODAY().isoformat()])[0])
@@ -149,6 +151,7 @@ def handle(h,c,u,path,method,core):
         if not reason or len(reason)>2000:core.fail('مبرر النقل مطلوب')
         if c.execute("SELECT 1 FROM requests WHERE employee_id=? AND status IN ('new','review')",(e['id'],)).fetchone():core.fail('راجع الطلبات المعلقة قبل نقل الموظف')
         if c.execute('SELECT 1 FROM employees WHERE manager_id=? AND archived=0',(e['id'],)).fetchone():core.fail('أعد إسناد موظفي المشرف قبل نقله')
+        if c.execute("SELECT 1 FROM supervisor_tasks WHERE employee_id=? AND status!='approved'",(e['id'],)).fetchone():core.fail('اعتمد مهام المشرف المعلقة قبل نقل الموظف',409)
         if c.execute('SELECT 1 FROM employee_assets WHERE employee_id=? AND returned_on IS NULL',(e['id'],)).fetchone():core.fail('راجع العهد القائمة قبل النقل')
         if core.payroll.commitments(c,e['id'])[0]>0:core.fail('راجع السلف والالتزامات القائمة قبل النقل')
         core.payroll.assert_open(c,e['id'],today,today,core)
