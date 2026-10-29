@@ -177,23 +177,22 @@
 .topbar #logout{position:absolute;left:20px;top:22px;color:var(--green);background:#e7f3ed;border-color:#d8e8de;white-space:nowrap}
 @media(max-width:760px){.topbar{padding-left:150px}.topbar #logout{left:12px;top:16px;padding:9px 10px;font-size:12px}.topbar>div:not(.user-pill){min-width:0}.topbar p{overflow-wrap:anywhere}}
 
-/* EHKAM eye opening: isolated from the application and OTP animations. */
-.ehkam-intro{position:fixed;inset:0;z-index:10000;display:grid;place-items:center;overflow:hidden;background:radial-gradient(ellipse at center,#104b3c 0,#062b23 55%,#031d18 100%);color:#f5edce;outline:none;animation:ehkam-intro-exit .5s 7.7s ease-in forwards}
-.intro-eyes{display:flex;direction:ltr;align-items:center;justify-content:center;gap:clamp(6px,4vw,54px);width:min(760px,94vw);transform:translateY(-6px);filter:drop-shadow(0 0 20px #c6aa6218);animation:ehkam-eyes-exit .45s 5.9s ease-in forwards}
-.intro-eye{width:46%;max-width:300px}.intro-eye-right{transform:scaleX(-1)}.intro-eye svg{width:100%;display:block;overflow:visible}
-.intro-aperture{animation:ehkam-eye-open 6.3s cubic-bezier(.4,0,.2,1) both;transform-origin:150px 95px}
-.intro-iris{transform-origin:153px 92px;animation:ehkam-iris-turn 3.6s .2s cubic-bezier(.45,0,.2,1) both}
-.intro-iris-lines{stroke-width:1.4;opacity:0;animation:ehkam-rings-appear 1s 3s ease-out forwards}
-.intro-iris-marks{transform-origin:153px 92px;animation:ehkam-marks-turn 3.4s linear infinite}
-.intro-brand-icon{mix-blend-mode:multiply;opacity:.72}.intro-eye-right .intro-brand-icon{transform:translateX(306px) scaleX(-1)}
-.intro-welcome{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:10px;opacity:0;animation:ehkam-welcome-in .6s 6.05s ease-out forwards}
-.intro-welcome strong{font-size:clamp(25px,5vw,42px);font-weight:750;letter-spacing:1px}.intro-welcome span{color:#c6aa62;font-size:clamp(14px,2.7vw,20px)}
-@keyframes ehkam-eye-open{0%{transform:scaleY(.06)}18%{transform:scaleY(.55)}40%,78%{transform:scaleY(1)}90%{transform:scaleY(.6)}100%{transform:scaleY(.02)}}
-@keyframes ehkam-iris-turn{0%{transform:rotate(-100deg) scale(.8)}55%{transform:rotate(140deg) scale(1)}100%{transform:rotate(360deg) scale(1)}}
-@keyframes ehkam-marks-turn{to{transform:rotate(360deg)}}
-@keyframes ehkam-rings-appear{to{opacity:.8;stroke-width:1.8}}
-@keyframes ehkam-eyes-exit{to{opacity:0;transform:translateY(-6px) scale(.96)}}
-@keyframes ehkam-welcome-in{from{opacity:0;filter:blur(8px);transform:scale(.94)}to{opacity:1;filter:blur(0);transform:scale(1)}}
+/* EHKAM logo greeting: the existing brand asset stays unchanged. */
+.ehkam-intro{position:fixed;inset:0;z-index:10000;display:grid;place-items:center;overflow:hidden;background:radial-gradient(ellipse at 50% 45%,#fff 0,#f2f7f4 62%,#e5eee8 100%);color:var(--green);outline:none;animation:ehkam-intro-exit .4s 3.2s ease-in forwards}
+.intro-lockup{display:flex;direction:rtl;align-items:center;justify-content:center;gap:clamp(20px,4vw,54px);width:min(900px,92vw)}
+.intro-logo{position:relative;flex:none;width:clamp(220px,28vw,310px);animation:ehkam-logo-arrive .6s cubic-bezier(.2,.7,.25,1) both;mix-blend-mode:multiply}
+.intro-logo svg{width:100%;display:block;overflow:hidden}.intro-logo-image{mix-blend-mode:multiply}
+.intro-face{animation:ehkam-face-appear .2s .5s both}.intro-face-eye{transform-box:fill-box;transform-origin:center;animation:ehkam-logo-blink .65s .65s ease-in-out both}
+.intro-face-smile{stroke-dasharray:26;stroke-dashoffset:26;animation:ehkam-logo-smile .4s 1.1s ease-out forwards}
+.intro-name{font-size:clamp(25px,3.4vw,40px);font-weight:750;line-height:1.6;text-align:center;animation:ehkam-name-arrive .6s 1.45s cubic-bezier(.2,.7,.25,1) both}
+.intro-logo-shine{transform:translateX(-240px) skewX(-15deg);opacity:0;animation:ehkam-logo-shine .85s 2.05s ease-in-out both}
+@keyframes ehkam-logo-arrive{from{opacity:0;transform:translateY(12px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes ehkam-face-appear{from{opacity:0}to{opacity:1}}
+@keyframes ehkam-logo-blink{0%,100%{transform:scaleY(1)}35%,55%{transform:scaleY(.12)}}
+@keyframes ehkam-logo-smile{to{stroke-dashoffset:0}}
+@keyframes ehkam-name-arrive{from{opacity:0;transform:translateX(16px);filter:blur(3px)}to{opacity:1;transform:translateX(0);filter:blur(0)}}
+@keyframes ehkam-logo-shine{0%{opacity:0;transform:translateX(-240px) skewX(-15deg)}15%{opacity:.75}85%{opacity:.75}100%{opacity:0;transform:translateX(500px) skewX(-15deg)}}
 @keyframes ehkam-intro-exit{to{opacity:0;visibility:hidden;pointer-events:none}}
-@media(prefers-reduced-motion:reduce){.ehkam-intro{animation:ehkam-intro-exit .01s 1.09s forwards}.intro-eyes{display:none}.intro-welcome{animation:none;opacity:1}.intro-aperture,.intro-iris,.intro-iris-lines,.intro-iris-marks{animation:none}}
+@media(max-width:640px){.intro-lockup{flex-direction:column;gap:24px}.intro-logo{width:min(68vw,260px)}.intro-name{font-size:clamp(23px,6vw,29px)}}
+@media(prefers-reduced-motion:reduce){.ehkam-intro{animation:ehkam-intro-exit .01s 1.09s forwards}.intro-logo,.intro-face,.intro-face-eye,.intro-face-smile,.intro-name,.intro-logo-shine{animation:none}.intro-face-smile{stroke-dashoffset:0}.intro-logo-shine{display:none}}
 @media print{.ehkam-intro{display:none!important}}
