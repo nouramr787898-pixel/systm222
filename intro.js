@@ -8,7 +8,6 @@
  let timer;
  function finish(){clearTimeout(timer);blocked.forEach(el=>el.inert=false);intro.remove();if(previous&&previous!==document.body&&previous.isConnected)previous.focus({preventScroll:true})}
  intro.addEventListener('keydown',event=>{if(event.key==='Escape')finish()});
- intro.querySelector('button').addEventListener('click',finish);
  intro.focus({preventScroll:true});
- timer=setTimeout(finish,reduced?250:7200);
+ timer=setTimeout(finish,reduced?1100:8200);
 })();
