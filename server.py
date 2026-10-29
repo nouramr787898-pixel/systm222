@@ -596,6 +596,7 @@ class Handler(BaseHTTPRequestHandler):
   if method=='GET' and path=='/professional-ui.js':return self.write((BASE/'professional-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/hr-ui.js':return self.write((BASE/'hr-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/ux-controls.js':return self.write((BASE/'ux-controls.js').read_bytes(),ctype='text/javascript')
+  if method=='GET' and path=='/intro.js':return self.write((BASE/'intro.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/app.js':return self.write((BASE/'app.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path in ('/favicon.ico','/favicon.png','/ehkam-icon.png','/ehkam-logo-full.png'):
    return self.write((BASE/path.lstrip('/')).read_bytes(),ctype='image/x-icon' if path.endswith('.ico') else 'image/png')
