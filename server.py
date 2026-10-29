@@ -572,8 +572,6 @@ class Handler(BaseHTTPRequestHandler):
  def process(self,method):
   if hasattr(self,'_parsed_body'):del self._parsed_body
   path=urlparse(self.path).path
-  if method=='POST' and path.startswith('/api/password/'):
-   return self.write({'error':'استعادة كلمة مرور الموظف بواسطة الإدارة فقط'},403)
   if method=='GET' and path=='/api/health':
    try:
     health=sqlite3.connect(DB.resolve().as_uri()+'?mode=ro',uri=True)

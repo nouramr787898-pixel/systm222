@@ -10,10 +10,9 @@ class PendingUpgradeTests(unittest.TestCase):
     client=fixture.WorkflowTests.client
     create=fixture.WorkflowTests.create
 
-    def test_employee_cannot_change_password_or_reset_it(self):
+    def test_employee_self_change_stays_blocked_and_recovery_requires_verified_token(self):
         self.assertEqual(self.employee('security/password',{'current_password':'Employee@123','new_password':'ChangedPassword!2026'})[0],403)
-        for action in ('request','verify','confirm','resend-whatsapp'):
-            self.assertEqual(self.client()('password/'+action,{'username':'employee'})[0],403)
+        self.assertEqual(self.client()('password/confirm',{'username':'employee','new_password':'ChangedPassword!2026','reset_token':'unverified-token'})[0],403)
         self.client('employee','Employee@123')
 
     def test_admin_changes_employee_password_and_revokes_sessions(self):
