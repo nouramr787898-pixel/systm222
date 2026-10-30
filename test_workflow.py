@@ -23,6 +23,8 @@ class WorkflowTests(unittest.TestCase):
         server.TODAY = lambda: server.datetime.date(2026, 10, 27)
         server.init(seeder=demo.seed_fixture)
         server.SESSIONS.clear()
+        with server.ai_assistant._LOCK:
+            server.ai_assistant._CALLS.clear();server.ai_assistant._ACTIVE.clear()
         self.http = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()

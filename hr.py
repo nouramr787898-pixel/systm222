@@ -475,7 +475,7 @@ def report_rows(c,u,qs,core):
             for contract in c.execute('SELECT * FROM contracts WHERE employee_id=? ORDER BY id',(e['id'],)):
                 if contract['end_date'] and not in_range(contract['end_date']):continue
                 result.append({**base,'start':contract['start_date'],'end':contract['end_date'],'closed_at':contract['closed_at'],'remaining_days':(dt.date.fromisoformat(contract['end_date'])-core.TODAY()).days if contract['end_date'] else None})
-        elif typ=='leave':result.append({**base,**{k:v for k,v in leave(c,e,core).items() if k!='monthly_history'},'as_of':core.TODAY().isoformat(),'report_note':'رصيد حالي؛ فلاتر الفترة لا تعيد بناء الرصيد التاريخي'})
+        elif typ=='leave':result.append({**base,**{k:v for k,v in leave(c,e,core).items() if k not in ('monthly_history','monthly','monthly_allowance','monthly_available','legacy_monthly_distribution')},'as_of':core.TODAY().isoformat(),'report_note':'رصيد حالي؛ فلاتر الفترة لا تعيد بناء الرصيد التاريخي'})
         elif typ=='salaries':
             e=dict(c.execute('SELECT * FROM employees WHERE id=?',(e['id'],)).fetchone())
             e['gross_salary']=core.salary(e)

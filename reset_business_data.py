@@ -18,7 +18,7 @@ import production_db
 import server
 
 CLEAR_TABLES=(
-    'supervisor_tasks','leave_accrual_cutover',
+    'employee_probations','supervisor_tasks','leave_accrual_cutover',
     'approval_delegations','company_policy_terms','import_previews','candidates','vacancies','appraisals','training_records',
     'loan_repayments','payroll_events','payroll_lines','payroll_runs','loans','pay_adjustments',
     'employee_terms','lifecycle_tasks','employee_assets','auth_sessions','login_limits',

@@ -162,27 +162,71 @@ def generate(question,data,history=None):
 
 
 def saudi(text):
-    for old,new in [('إزاي','كيف'),('ازاي','كيف'),('كام','كم'),('دلوقتي','الحين'),('عايز','تبي'),('عاوز','تبي'),('ما تجمعهمش','لا تجمعهم'),('مش ','مو '),('ده مثال','هذا مثال'),('زي «','مثل «'),('اختار','اختر'),('ما تقدرش','ما تقدر'),(' دي ',' هذي '),('الصيغة دي','هالصيغة'),('بيتحسب','ينحسب'),('النهارده','اليوم'),('اكتر','أكثر'),('علشان','عشان'),('مفيش','ما فيه')]:text=text.replace(old,new)
+    for old,new in [('إزاي','كيف'),('ازاي','كيف'),('كام','كم'),('دلوقتي','الحين'),('عايز','تبي'),('عاوز','تبي'),('ما تجمعهمش','لا تجمعهم'),('مش ','مو '),('ده مثال','هذا مثال'),('زي «','مثل «'),('اختار','اختر'),('ما تقدرش','ما تقدر'),(' دي ',' هذي '),('الصيغة دي','هالصيغة'),('بيتحسب','ينحسب'),('النهارده','اليوم'),('اكتر','أكثر'),('علشان','عشان'),('مفيش','ما فيه')]:text=re.sub(r'(?<!\w)'+re.escape(old.strip())+r'(?!\w)',lambda _:new.strip(),text)
     return text
 
 
-def attendance_answer(c,u,question,core):
+def employee_facts_answer(c,u,question,core):
+    """Read-only, deterministic employee facts. Every source keeps its role scope."""
+    import datetime as dt
     q=normalize(question)
-    if u['role']!='manager' or not contains(q,('فين','وين','حاضر','غايب','غائب','حضور')):return None
-    visible=[e for e in core.visible_employees(c,u) if e['id']!=u['employee_id']]
-    matches=[e for e in visible if any(len(word)>1 and normalize(word) in q.split() for word in e['name'].split()) or normalize(e['employee_no']) in q]
-    exact=[e for e in matches if normalize(e['name']) in q or normalize(e['employee_no']) in q]
-    if exact:matches=exact
-    if not matches:return {'answer':'ما لقيت موظفًا بهذا الاسم ضمن الموظفين المسموح لك بالاطلاع عليهم. اكتب الاسم الكامل أو الرقم الوظيفي.','sources':['نطاق فريق المشرف']}
-    if len(matches)>1:return {'answer':'أبشر، فيه أكثر من موظف بهذا الاسم ضمن فريقك: '+'، '.join(e['name']+' ('+e['employee_no']+')' for e in matches)+'. حدّد الاسم الكامل أو الرقم الوظيفي.','sources':['الموظفون ضمن صلاحيات المشرف']}
-    e=matches[0];day=core.TODAY().isoformat()
-    record=c.execute('SELECT check_in,check_out FROM attendance WHERE employee_id=? AND day=?',(e['id'],day)).fetchone()
-    if record and record['check_in']:state='حاضر اليوم، سجّل الحضور الساعة '+record['check_in']+(' والانصراف الساعة '+record['check_out'] if record['check_out'] else '، وما سجّل انصراف إلى الآن')
-    elif c.execute("SELECT 1 FROM absences WHERE employee_id=? AND day=? AND status='approved'",(e['id'],day)).fetchone():state='عليه غياب معتمد اليوم'
-    elif c.execute("SELECT 1 FROM requests WHERE employee_id=? AND status='approved' AND type IN ('annual_leave','sick_leave','unpaid_leave') AND start_date<=? AND end_date>=?",(e['id'],day,day)).fetchone():state='عنده إجازة معتمدة اليوم'
-    elif core.hr.holiday(c,e,day) or str(core.TODAY().weekday()) not in e['workweek'].split(','):state='اليوم راحة أو عطلة حسب جدوله'
-    else:state='ما سجّل حضور اليوم؛ هذا ما يثبت غيابًا معتمدًا، راجع الدوام والإجازات'
-    return {'answer':'أبشر، '+e['name']+' '+state+'.','sources':['سجل الحضور والإجازات ضمن صلاحيات المشرف — '+day]}
+    attendance=contains(q,('حضر','حضرت','حاضر','حضور','غايب','غائب','بصمه','انصراف','فين','وين'))
+    advance=contains(q,('سلفه','سلف','قرض'))
+    requests=contains(q,('طلب','طلبات','قدمت','قدم'))
+    balance=contains(q,('رصيد','متراكم','اجمالي الاجازات'))
+    contract=contains(q,('عقد','مسمى','قسم','اداره','وظيفته','وظيفتها','شركته','شركتها'))
+    if not any((attendance,advance,requests,balance,contract)) or contains(q,('كيف','ازاي','طريقه','خطوات')):return None
+    visible=core.visible_employees(c,u)
+    def phrase(value):return bool(re.search(r'(?<!\w)'+re.escape(normalize(value))+r'(?!\w)',q))
+    exact=[e for e in visible if phrase(e['name']) or phrase(e['employee_no'])]
+    matches=exact or [e for e in visible if any(len(word)>1 and phrase(word) for word in e['name'].split())]
+    if not matches:
+        if contains(q,('رصيدي','طلباتي','حضرت انا','انا حضرت','سلفتي','عقدي')):matches=[e for e in visible if e['id']==u['employee_id']]
+        elif not contains(q,('موظف','موظفه','شوف','شف ','وين','فين','هل ')):return None
+    if not matches:return {'answer':'ما لقيت موظفًا بهذا الاسم ضمن الموظفين المسموح لك بالاطلاع عليهم. اكتب الاسم الكامل أو الرقم الوظيفي.','sources':['نطاق الموظفين المسموح لحسابك']}
+    if len(matches)>1:return {'answer':'أبشر، فيه أكثر من موظف بهذا الاسم: '+'، '.join(e['name']+' ('+e['employee_no']+')' for e in matches)+'. حدّد الاسم الكامل أو الرقم الوظيفي.','sources':['الموظفون ضمن صلاحيات الحساب']}
+    e=matches[0];today=core.TODAY();start=end=today.isoformat();period='اليوم'
+    raw=question.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩','0123456789'))
+    date=re.search(r'\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4})\b',raw)
+    if date:start=end=core.normalize_date(date[0]);period='بتاريخ '+start
+    elif contains(q,('امس','امبارح')):start=end=(today-dt.timedelta(days=1)).isoformat();period='أمس'
+    elif contains(q,('هذا الشهر','الشهر الحالي','الشهر ده')):start=today.replace(day=1).isoformat();period='هذا الشهر حتى اليوم'
+    elif contains(q,('كل الطلبات','كل السلف','سجل الطلبات','سجل السلف')):start='0001-01-01';period='في السجل المتاح'
+    profile=core.permissions.profile(c,u)
+    def result(text,source):return {'answer':'أبشر، '+e['name']+' '+text,'sources':[source+' — '+period]}
+    def date_in(value):
+        if not value:return False
+        stamp=dt.datetime.fromisoformat(value.replace('Z','+00:00'))
+        if stamp.tzinfo:stamp=stamp.astimezone(core.workforce.zone(c,e['company_id']))
+        return start<=stamp.date().isoformat()<=end
+    if advance:
+        if (profile=='manager' and e['id']!=u['employee_id']) or profile=='hr':return result('بيانات السلف الخاصة به مو ضمن صلاحيات حسابك.','صلاحيات البيانات المالية')
+        loans=[dict(row) for row in c.execute('SELECT * FROM loans WHERE employee_id=? ORDER BY id DESC',(e['id'],)) if start<=row['disbursed_on']<=end]
+        allowed=[r for r in core.visible_requests(c,u,include_details=False) if r['employee_id']==e['id'] and r['type']=='advance' and date_in(r['created_at'])]
+        labels={'new':'جديد','review':'تحت المراجعة','approved':'معتمد','rejected':'مرفوض','cancelled':'ملغي'}
+        text=('فيه '+str(len(loans))+' سلفة مسجّل صرفها '+period+': '+ '؛ '.join(str(row['principal_cents']/100)+' ريال، صرف '+row['disbursed_on'] for row in loans[:10])+'.') if loans else 'ما فيه سلفة مسجّل صرفها '+period+'. هذا حسب إثبات الصرف في النظام.'
+        text+=' طلبات السلفة المقدمة '+period+': '+( '؛ '.join('طلب EH-'+str(r['id']).zfill(6)+' — '+labels.get(r['status'],r['status']) for r in allowed[:10]) if allowed else 'ما فيه طلبات ظاهرة لحسابك')+'. الاعتماد وحده ما يعني صرف المبلغ.'
+        return result(text,'طلبات السلف وسجل الصرف ضمن الصلاحيات')
+    if requests:
+        rows=[r for r in core.visible_requests(c,u,include_details=False) if r['employee_id']==e['id'] and date_in(r['created_at'])]
+        labels={'new':'جديد','review':'تحت المراجعة','approved':'معتمد','rejected':'مرفوض','cancelled':'ملغي','accepted':'مقبول','declined':'مرفوض من الموظف','closed':'مغلق'}
+        text=('عنده '+str(len(rows))+' طلب ظاهر ضمن صلاحياتك '+period+': '+ '؛ '.join('EH-'+str(r['id']).zfill(6)+' '+TYPE_NAMES.get(r['type'],r['type'])+' — '+labels.get(r['status'],r['status']) for r in rows[:10])+'.') if rows else 'ما فيه طلبات ظاهرة ضمن صلاحياتك '+period+'.'
+        return result(text,'سجل الطلبات المتاح للحساب')
+    if balance:
+        if profile in ('payroll','auditor'):return result('رصيد الإجازات مو ضمن صلاحيات حسابك.','صلاحيات أرصدة الإجازات')
+        info=core.leave(c,core.user_allowed_emp(c,u,e['id']))
+        return result('رصيده المتاح '+str(info['available'])+' يوم، والسنوي '+str(info['annual_entitlement'])+' يوم. دفعة الشهر تنضاف في نهاية الشهر حسب السجل.','رصيد الإجازات الفعلي')
+    if contract:
+        return result('شركته '+e['company_name']+'، القسم '+(e['department'] or 'غير مسجل')+'، المسمى '+(e['job'] or 'غير مسجل')+'، والعقد من '+str(e['contract_start'] or 'غير مسجل')+' إلى '+str(e['contract_end'] or 'غير مسجل')+'.','الملف الوظيفي المتاح')
+    if start!=end:return result('حدّد يومًا واحدًا لعرض بصمة الحضور؛ مثل اليوم أو أمس أو 02/11/2026.','سجل الحضور')
+    record=c.execute('SELECT check_in,check_out FROM attendance WHERE employee_id=? AND day=?',(e['id'],start)).fetchone()
+    if record and record['check_in']:state='حاضر '+period+'، سجّل الحضور الساعة '+record['check_in']+(' والانصراف الساعة '+record['check_out'] if record['check_out'] else '، وما سجّل انصراف إلى الآن')
+    elif c.execute("SELECT 1 FROM absences WHERE employee_id=? AND day=? AND status='approved'",(e['id'],start)).fetchone():state='عليه غياب معتمد '+period
+    elif c.execute("SELECT 1 FROM requests WHERE employee_id=? AND status='approved' AND type IN ('annual_leave','sick_leave','unpaid_leave') AND start_date<=? AND end_date>=?",(e['id'],start,start)).fetchone():state='عنده إجازة معتمدة '+period
+    elif core.hr.holiday(c,e,start) or str(dt.date.fromisoformat(start).weekday()) not in e['workweek'].split(','):state=period+' راحة أو عطلة حسب جدوله'
+    else:state='ما سجّل حضور '+period+'؛ هذا ما يثبت غيابًا معتمدًا، راجع الدوام والإجازات'
+    return result(state+'.','سجل الحضور ضمن صلاحيات الحساب')
+
 
 def handle(h,c,u,path,method,core):
     if path!='/api/assistant':return False
@@ -195,10 +239,11 @@ def handle(h,c,u,path,method,core):
     acquire(u['id'],core)
     try:
         reserve(u['id'],core)
-        result=attendance_answer(c,u,question.strip(),core) or generate(question.strip(),context(c,u,core),history)
-        result['answer']=saudi(result['answer'])
+        facts=employee_facts_answer(c,u,question.strip(),core)
+        result=facts or generate(question.strip(),context(c,u,core),history)
+        if not facts:result['answer']=saudi(result['answer'])
         core.record(c,u,'assistant_answer','user',u['id'],{'mode':'local_guidance','question_length':len(question)})
         c.commit()
     finally:
         with _LOCK:_ACTIVE.discard(u['id'])
-    h.write({**result,'mode':'local_guidance','notice':'إرشادات محلية محددة النطاق، بدون نموذج AI خارجي. لا يتم تنفيذ إجراءات من المحادثة.'});return True
+    h.write({**result,'mode':'local_guidance','notice':'إجابات من السجلات المتاحة لحسابك وإرشادات محلية؛ لا يتم تعديل البيانات من المحادثة.'});return True

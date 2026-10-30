@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import permissions
 
 VERSION='requested-branches-v1'
+DELETE_VERSION='vacancy-delete-v1'
 
 def migrate(c):
     additions={'companies':{'employee_prefix':"TEXT NOT NULL DEFAULT ''",'employee_sequence':'INTEGER NOT NULL DEFAULT 0'},'employee_assets':{'receipt_status':"TEXT NOT NULL DEFAULT 'legacy'",'receipt_at':'TEXT'},'vacancies':{'public_token':'TEXT','job_name':"TEXT NOT NULL DEFAULT ''",'retention_until':'TEXT'},'candidates':{'priority':'INTEGER NOT NULL DEFAULT 0','cv_name':'TEXT','cv_content':'BLOB','probation_start':'TEXT','probation_employee_id':'INTEGER REFERENCES employees(id)','probation_confirmed_at':'TEXT'}}
@@ -18,6 +19,8 @@ def migrate(c):
             if name not in existing:c.execute('ALTER TABLE '+table+' ADD COLUMN '+name+' '+decl)
     c.execute('CREATE TABLE IF NOT EXISTS leave_accrual_cutover(contract_id INTEGER PRIMARY KEY REFERENCES contracts(id),effective_on TEXT NOT NULL,accrued REAL NOT NULL,history TEXT NOT NULL)')
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS company_employee_prefix ON companies(employee_prefix) WHERE employee_prefix!=''")
+    c.execute('CREATE TABLE IF NOT EXISTS employee_probations(id INTEGER PRIMARY KEY,employee_id INTEGER NOT NULL REFERENCES employees(id),source_candidate_id INTEGER NOT NULL,starts_on TEXT NOT NULL,confirmed_at TEXT,UNIQUE(employee_id,starts_on))')
+    c.execute('INSERT OR IGNORE INTO schema_migrations VALUES(?)',(DELETE_VERSION,))
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS vacancy_public_token ON vacancies(public_token)')
     c.execute('''CREATE TABLE IF NOT EXISTS supervisor_tasks(id INTEGER PRIMARY KEY,employee_id INTEGER NOT NULL REFERENCES employees(id),supervisor_id INTEGER NOT NULL REFERENCES users(id),title TEXT NOT NULL,work_day TEXT NOT NULL,due_at TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'assigned' CHECK(status IN ('assigned','submitted','approved')),employee_note TEXT NOT NULL DEFAULT '',review_note TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,submitted_at TEXT,approved_at TEXT)''')
     c.execute('CREATE INDEX IF NOT EXISTS supervisor_tasks_pending ON supervisor_tasks(employee_id,work_day,status)')
@@ -50,12 +53,23 @@ def probation_sync(c,core):
             c.execute('UPDATE candidates SET probation_confirmed_at=? WHERE id=?',(core.now(),r['id']))
             core.record(c,{'id':None,'username':'system','role':'system'},'probation_auto_confirm','employee',r['probation_employee_id'],{'candidate_id':r['id'],'days':90})
 
+    for row in c.execute('SELECT * FROM employee_probations WHERE confirmed_at IS NULL').fetchall():
+        e=c.execute('SELECT * FROM employees WHERE id=?',(row['employee_id'],)).fetchone()
+        if not e or e['archived'] or e['status']!='فترة تجربة':continue
+        ended=core.hr.employment_end(c,e)
+        if ended and ended<core.TODAY().isoformat():continue
+        if core.TODAY()>=dt.date.fromisoformat(row['starts_on'])+dt.timedelta(days=90):
+            changed=c.execute("UPDATE employees SET status='نشط' WHERE id=? AND status='فترة تجربة'",(e['id'],))
+            if not changed.rowcount:continue
+            c.execute('UPDATE employee_probations SET confirmed_at=? WHERE id=?',(core.now(),row['id']))
+            core.record(c,{'id':None,'username':'system','role':'system'},'probation_auto_confirm','employee',e['id'],{'source_candidate_id':row['source_candidate_id'],'days':90})
+
 def start_probation(c,u,e,cid,start,core):
     row=c.execute('SELECT a.*,v.company_id FROM candidates a JOIN vacancies v ON v.id=a.vacancy_id WHERE a.id=?',(cid,)).fetchone()
     if not row or row['company_id']!=e['company_id'] or row['probation_start'] or e['archived']:core.fail('راجع المرشح والشركة وملف الموظف')
     permissions.company(c,u,row['company_id'],core)
     if not start or (e['hire_date'] and start<e['hire_date']) or (e['contract_start'] and start<e['contract_start']) or (e['contract_end'] and start>e['contract_end']):core.fail('بداية التجربة يجب أن تكون داخل فترة عمل الموظف')
-    if c.execute('SELECT 1 FROM candidates WHERE probation_employee_id=?',(e['id'],)).fetchone():core.fail('الموظف مرتبط بفترة تجربة بالفعل')
+    if c.execute('SELECT 1 FROM candidates WHERE probation_employee_id=?',(e['id'],)).fetchone() or c.execute('SELECT 1 FROM employee_probations WHERE employee_id=? AND confirmed_at IS NULL',(e['id'],)).fetchone():core.fail('الموظف مرتبط بفترة تجربة بالفعل')
     c.execute("UPDATE candidates SET status='hired',probation_start=?,probation_employee_id=? WHERE id=?",(start,e['id'],cid))
     c.execute("UPDATE employees SET status='فترة تجربة' WHERE id=?",(e['id'],))
     core.record(c,u,'probation_start','employee',e['id'],{'candidate_id':cid,'days':90,'start':start})
@@ -183,6 +197,24 @@ def handle(h,c,u,path,method,core):
             start_probation(c,u,e,cid,start,core)
         else:core.fail('إجراء غير صالح')
         core.record(c,u,'candidate_'+path.rsplit('/',1)[1],'company',r['company_id'],{'candidate_id':cid});probation_sync(c,core);c.commit();return reply({'ok':True})
+    if re.fullmatch('/api/vacancies/[0-9]+/delete',path) and method=='POST':
+        if permissions.profile(c,u)!='owner':core.fail('حذف الوظيفة النهائي للأدمين بصلاحية الإدارة العامة فقط',403)
+        d=h.input();vid=int(path.split('/')[3])
+        if d.get('confirm') is not True:core.fail('تأكيد حذف الوظيفة والمتقدمين والسير الذاتية مطلوب')
+        core.security.attempt(c,u['username'],core.security.peer(h),core)
+        full=c.execute('SELECT password_hash FROM users WHERE id=?',(u['id'],)).fetchone()
+        if not core.verifypw(str(d.get('password','')),full[0]):core.fail('كلمة مرور الأدمين غير صحيحة',403)
+        c.execute('PRAGMA secure_delete=ON');c.execute('BEGIN IMMEDIATE')
+        job=c.execute('SELECT * FROM vacancies WHERE id=?',(vid,)).fetchone()
+        if not job:core.fail('الوظيفة غير موجودة أو سبق حذفها',404)
+        if 'job_token' not in d or d['job_token']!=job['public_token']:core.fail('تغيرت الوظيفة؛ أعد فتح القائمة وتأكيد العملية',409)
+        permissions.company(c,u,job['company_id'],core)
+        candidates=c.execute('SELECT id,probation_employee_id,probation_start,probation_confirmed_at FROM candidates WHERE vacancy_id=?',(vid,)).fetchall()
+        for candidate in candidates:
+            if candidate['probation_employee_id'] and candidate['probation_start']:
+                c.execute('INSERT OR IGNORE INTO employee_probations(employee_id,source_candidate_id,starts_on,confirmed_at) VALUES(?,?,?,?)',(candidate['probation_employee_id'],candidate['id'],candidate['probation_start'],candidate['probation_confirmed_at']))
+        c.execute('DELETE FROM candidates WHERE vacancy_id=?',(vid,));c.execute('DELETE FROM vacancies WHERE id=?',(vid,))
+        core.record(c,u,'vacancy_delete','company',job['company_id'],{'vacancy_id':vid,'title':job['title'],'deleted_candidates':len(candidates),'employment_records_preserved':True});c.commit();return reply({'ok':True,'deleted_candidates':len(candidates)})
     if re.fullmatch('/api/vacancies/[0-9]+/publish',path) and method=='POST':
         admin();vid=int(path.split('/')[3]);v=c.execute('SELECT * FROM vacancies WHERE id=?',(vid,)).fetchone()
         if not v:core.fail('الوظيفة غير موجودة',404)

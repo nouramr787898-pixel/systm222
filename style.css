@@ -199,3 +199,6 @@
 
 /* Start every visual phase together only after the logo is decoded. */
 .ehkam-intro:not(.intro-running) .intro-logo,.ehkam-intro:not(.intro-running) .intro-face,.ehkam-intro:not(.intro-running) .intro-word,.ehkam-intro:not(.intro-running) .intro-logo-shine{animation-play-state:paused}
+
+/* Read-only payroll allowance disclosure. */
+.allowance-breakdown summary{cursor:pointer;white-space:nowrap;color:var(--green);font-weight:600}.allowance-breakdown dl{min-width:210px;margin:10px 0}.allowance-breakdown dl>div{display:flex;justify-content:space-between;gap:16px;padding:5px 0;border-bottom:1px solid #e4ebe6}.allowance-breakdown dd{margin:0;white-space:nowrap}.allowance-breakdown small{display:block;max-width:260px;white-space:normal}

@@ -97,6 +97,13 @@ def init(seeder=None,allow_create=False):
     if backup.exists():raise RuntimeError('Requested migration backup exists; verify before retrying')
     with sqlite3.connect(backup) as target:existing.backup(target)
     os.chmod(backup,0o600)
+ if DB.exists():
+  with conn() as existing:
+   if existing.execute("SELECT 1 FROM sqlite_master WHERE name='schema_migrations'").fetchone() and not existing.execute('SELECT 1 FROM schema_migrations WHERE version=?',(requested_batch.DELETE_VERSION,)).fetchone():
+    backup=DB.with_name(DB.name+'.before-'+requested_batch.DELETE_VERSION+'.bak')
+    if backup.exists():raise RuntimeError('Vacancy migration backup exists; verify before retrying')
+    with sqlite3.connect(backup) as target:existing.backup(target)
+    os.chmod(backup,0o600)
  c=conn(allow_create=allow_create);c.executescript('''
  CREATE TABLE IF NOT EXISTS companies(id INTEGER PRIMARY KEY,name TEXT NOT NULL, name_en TEXT DEFAULT '',contract_end TEXT,city TEXT DEFAULT '', address TEXT DEFAULT '', latitude REAL, longitude REAL, geofence_radius REAL NOT NULL DEFAULT 100, archived INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','manager','employee')),employee_id INTEGER,company_id INTEGER);
