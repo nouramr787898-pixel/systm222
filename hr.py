@@ -102,12 +102,25 @@ def legacy_leave(c,e,core,asof=None):
             'elapsed_months':elapsed,'monthly_history':history,'expired_contract_accrual':expired_accrual}
 
 
+def leave_display(balance,today):
+    """Split the existing net balance for display; never write or re-credit leave.
+
+    Earlier grants and the opening balance form the accumulated bucket. Reviewed
+    deductions reduce that bucket first, then the current month's posted grant.
+    """
+    month=today.isoformat()[:7]
+    posted=sum(float(row['days']) for row in balance['monthly_history'] if row['date'][:7]==month and row['date']<=today.isoformat())
+    monthly=round(min(max(0,float(balance['available'])),posted),4)
+    return {**balance,'monthly_available':monthly,
+            'accumulated_available':round(float(balance['available'])-monthly,4)}
+
+
 def leave(c,e,core,asof=None):
     today=asof or core.TODAY()
     old=legacy_leave(c,e,core,asof)
     cutoff=c.execute('SELECT * FROM leave_accrual_cutover WHERE contract_id=?',(old['contract_id'],)).fetchone()
     # Historical queries retain their former calculation before the change date.
-    if cutoff and today.isoformat()<cutoff['effective_on']:return old
+    if cutoff and today.isoformat()<cutoff['effective_on']:return leave_display(old,today)
     end=employment_end(c,e);until=min(today,dt.date.fromisoformat(end)) if end else today
     history=json.loads(cutoff['history']) if cutoff else []
     accrued=float(cutoff['accrued']) if cutoff else 0
@@ -126,7 +139,7 @@ def leave(c,e,core,asof=None):
     carry=float(e['carryover'])+(earned if expired else 0)
     deductions=old['approved_used']+old['absence_used']+old['settled_days']
     monthly_visible=(float(e['annual_entitlement'])/12 if today.day==calendar.monthrange(today.year,today.month)[1] and (not end or end>=today.isoformat()) else 0)
-    return {**old,'carryover':carry,'accrued':0 if expired else earned,'available':round(carry+(0 if expired else earned)-deductions,4),'monthly_allowance':round(monthly_visible,4),'monthly_history':history,'elapsed_months':len(history),'expired_contract_accrual':earned if expired else 0,'accrual_policy':'complete-calendar-month-end','historical_cutover':cutoff['effective_on'] if cutoff else None}
+    return leave_display({**old,'carryover':carry,'accrued':0 if expired else earned,'available':round(carry+(0 if expired else earned)-deductions,4),'monthly_allowance':round(monthly_visible,4),'monthly_history':history,'elapsed_months':len(history),'expired_contract_accrual':earned if expired else 0,'accrual_policy':'complete-calendar-month-end','historical_cutover':cutoff['effective_on'] if cutoff else None},today)
 
 
 def holiday(c,e,day):
@@ -374,8 +387,8 @@ def handle(h,c,u,path,method,core):
             if not core.business_days(e,b,b,c):core.fail('آخر يوم جزئي يجب أن يكون يوم عمل')
             days=days-1+fraction
         balance=leave(c,e,core)
-        monthly_available=balance['accrued']
-        return respond({'days':days,'monthly_available':monthly_available,'monthly_after_approval':round(max(0,monthly_available-days),4),'available':balance['available'],'after_approval':round(balance['available']-days,4)})
+        monthly_available=balance['monthly_available']
+        return respond({'days':days,'monthly_available':monthly_available,'monthly_after_approval':round(min(monthly_available,max(0,balance['available']-days)),4),'available':balance['available'],'after_approval':round(balance['available']-days,4)})
     if path=='/api/contracts' and method=='GET':
         e=employee();return respond([dict(r) for r in c.execute('SELECT * FROM contracts WHERE employee_id=? ORDER BY id',(e['id'],))])
     if path=='/api/contracts/renew' and method=='POST':
