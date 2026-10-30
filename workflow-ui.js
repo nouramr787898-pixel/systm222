@@ -4,17 +4,17 @@ function employeeMatches(e,term){return [e.name,e.name_en,e.employee_no,e.identi
 function chooseCompanyEmployee(companyId){
  const company=companies.find(c=>c.id===companyId&&!c.archived);if(!company)return notify('الشركة غير متاحة',true);
  const candidates=employees.filter(e=>!e.archived);let selected=null;
- openModal('اختيار موظف مسجل',formwrap([dropdown('company_id','الشركة',[[company.id,company.name]],company.id),field('existingEmployeeSearch','بحث بالاسم أو الهوية أو الرقم الوظيفي','search'),'<div class="employee-picker full" id="existingEmployeeChoices"></div>',field('reason','مبرر النقل','text','','required maxlength="2000"')],'نقل الموظف للشركة'),async v=>{
+ openModal('اختيار موظف مسجل',formwrap([dropdown('company_id','الشركة',[[company.id,company.name]],company.id),dropdown('source_company_id','شركة الموظف الحالية',[['','اختر الشركة أولًا'],...activeCompanyOptions().filter(([id])=>id!==companyId)]),field('existingEmployeeSearch','بحث بالاسم أو الهوية أو الرقم الوظيفي','search'),'<div class="employee-picker full" id="existingEmployeeChoices"></div>',field('reason','مبرر النقل','text','','required maxlength="2000"')],'نقل الموظف للشركة'),async v=>{
   if(!selected)throw Error('اختر موظفًا من القائمة');
   await api('/company-employee-move',{company_id:companyId,employee_id:selected,reason:v.reason});selectedEmployee=selected;notify('تم نقل الموظف مع حفظ تاريخه وأرصده');
  });
  $('[name=company_id]').disabled=true;const confirm=$('#modal [type=submit]');confirm.disabled=true;
- const draw=()=>{const rows=candidates.filter(e=>employeeMatches(e,$('[name=existingEmployeeSearch]').value));
+ const draw=()=>{const rows=candidates.filter(e=>e.company_id===Number($('[name=source_company_id]').value)&&employeeMatches(e,$('[name=existingEmployeeSearch]').value));
   $('#existingEmployeeChoices').innerHTML=rows.map(e=>`<label class="employee-choice"><input type="radio" name="employee_id" value="${e.id}" ${e.company_id===companyId?'disabled':''} ${e.id===selected?'checked':''}><span><strong data-i18n-ignore>${esc(e.name)}</strong><small data-i18n-ignore>${esc(e.employee_no)} · ${esc(e.company_name)}</small>${e.company_id===companyId?'<small>موجود بالفعل في الشركة</small>':''}</span></label>`).join('')||'<p class="empty">لا يوجد موظف مطابق للبحث</p>';
   confirm.disabled=!rows.some(e=>e.id===selected&&e.company_id!==companyId);
   $('#existingEmployeeChoices').querySelectorAll('[name=employee_id]').forEach(r=>r.onchange=()=>{selected=Number(r.value);confirm.disabled=false});
  };
- $('[name=existingEmployeeSearch]').oninput=draw;draw();
+ $('[name=source_company_id]').required=true;$('[name=source_company_id]').onchange=()=>{selected=null;draw()};$('[name=existingEmployeeSearch]').oninput=draw;draw();
 }
 const employeeDetailBeforeGrid=window.employeeDetail;
 window.employeeDetail=async function(id){
@@ -31,7 +31,7 @@ auditPage=async function(){
 };
 async function newSupervisorAccount(){
  const rows=await api('/supervisor-candidates');let selected=null;
- openModal('إضافة حساب مشرف',formwrap([dropdown('company_id','الشركة',activeCompanyOptions()),field('supervisorSearch','بحث بالاسم أو الهوية أو الرقم الوظيفي','search'),'<div class="employee-picker full" id="supervisorChoices"></div>',field('username','اسم دخول المشرف','text','','required pattern="[A-Za-z0-9_.-]{3,64}" autocomplete="off"'),field('new_password','كلمة مرور المشرف','password','','required minlength="12" maxlength="128" autocomplete="new-password"'),field('password','كلمة مرور المسؤول الحالية','password','','required autocomplete="current-password"')]),async v=>{
+ openModal('إضافة حساب مشرف',formwrap([dropdown('company_id','الشركة',[['','اختر الشركة أولًا'],...activeCompanyOptions()]),field('supervisorSearch','بحث بالاسم أو الهوية أو الرقم الوظيفي','search'),'<div class="employee-picker full" id="supervisorChoices"></div>',field('username','اسم دخول المشرف','text','','required pattern="[A-Za-z0-9_.-]{3,64}" autocomplete="off"'),field('new_password','كلمة مرور المشرف','password','','required minlength="12" maxlength="128" autocomplete="new-password"'),field('password','كلمة مرور المسؤول الحالية','password','','required autocomplete="current-password"')]),async v=>{
   if(!selected)throw Error('اختر موظفًا من القائمة');await api('/supervisor-accounts',{...v,employee_id:selected});notify('تم إنشاء حساب المشرف؛ تغيير كلمة المرور مطلوب عند أول دخول');
  });
  const submit=$('#modal [type=submit]');submit.disabled=true;

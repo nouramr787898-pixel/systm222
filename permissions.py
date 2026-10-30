@@ -19,6 +19,7 @@ def profile(c,u):
 
 
 def guard(h,c,u,path,method,core):
+    validate_selection(h,c,u,path,method,core)
     scope_request(h,c,u,path,method,core)
     role=profile(c,u)
     if path=='/api/employee-advances' and method=='GET' and role in ('owner','payroll','auditor','manager','employee'):return
@@ -101,3 +102,29 @@ def scope_request(h,c,u,path,method,core):
         if body.get('target')=='company':company(c,u,body.get('id',0),core)
         elif body.get('target')=='employee':person(c,u,int(body.get('id',0)),core)
     if path=='/api/employee-transfer':core.fail('النقل بين الشركات للإدارة العامة',403)
+
+
+def validate_selection(h,c,u,path,method,core):
+    """A company/employee pair submitted by the shared picker must agree."""
+    if method!='POST':return
+    data=h.input();chosen=data.get('selection_company_id')
+    if chosen in (None,''):return  # Older clients retain existing route authorization.
+    co=int(chosen);company(c,u,co,core)
+    if u['role']!='admin' and co!=u['company_id']:core.fail('الشركة خارج نطاق صلاحيات الحساب',403)
+    if not c.execute('SELECT 1 FROM companies WHERE id=? AND archived=0',(co,)).fetchone():core.fail('الشركة غير متاحة',403)
+    if path.startswith('/api/employees/') and path.rsplit('/',1)[1].isdigit():
+        e=core.user_allowed_emp(c,u,int(path.rsplit('/',1)[1]))
+        if e['company_id']!=co:core.fail('ملف الموظف لا يتبع الشركة المختارة',403)
+    for field in ('employee_id','source_manager_id','target_manager_id','manager_id'):
+        if not data.get(field):continue
+        e=core.user_allowed_emp(c,u,int(data[field]))
+        if e['company_id']!=co:core.fail('الموظف لا يتبع الشركة المختارة',403)
+    if path=='/api/security/employee-passwords' and data.get('user_id'):
+        row=c.execute('SELECT e.company_id FROM users u JOIN employees e ON e.id=u.employee_id WHERE u.id=?',(int(data['user_id']),)).fetchone()
+        if not row or row[0]!=co:core.fail('حساب الموظف لا يتبع الشركة المختارة',403)
+    if path=='/api/loans/disburse' and data.get('request_id'):
+        row=c.execute('SELECT company_id FROM requests WHERE id=?',(int(data['request_id']),)).fetchone()
+        if not row or row[0]!=co:core.fail('طلب السلفة لا يتبع الشركة المختارة',403)
+    if path=='/api/candidates' and data.get('vacancy_id'):
+        row=c.execute('SELECT company_id FROM vacancies WHERE id=?',(int(data['vacancy_id']),)).fetchone()
+        if not row or row[0]!=co:core.fail('الوظيفة لا تتبع الشركة المختارة',403)

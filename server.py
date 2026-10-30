@@ -600,6 +600,7 @@ class Handler(BaseHTTPRequestHandler):
    return self.write((BASE/'apply.html').read_bytes(),ctype='text/html')
   if method=='GET' and path in ('/leaflet.js','/leaflet.css'):
    return self.write((BASE/path.lstrip('/')).read_bytes(),ctype='text/css' if path.endswith('.css') else 'text/javascript')
+  if method=='GET' and path=='/company-first.js':return self.write((BASE/'company-first.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/requested-ui.js':return self.write((BASE/'requested-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path in ('/','/index.html'):
    return self.write((BASE/'index.html').read_bytes(),ctype='text/html')

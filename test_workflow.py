@@ -103,7 +103,7 @@ class WorkflowTests(unittest.TestCase):
         code,before=self.employee('leave/preview',body)
         self.assertEqual(code,200)
         self.assertEqual(before['monthly_available'],round(21/12,4))
-        self.assertEqual(before['monthly_after_approval'],0)
+        self.assertEqual(before['monthly_after_approval'],before['monthly_available'])  # Existing accumulated leave covers these two days.
         self.assertEqual(before['after_approval'],before['available']-2)
         rid=self.create('annual_leave',start_date='26/10/2026',end_date='26/10/2026')
         self.assertEqual(self.admin(f'requests/{rid}',{'status':'approved'})[0],200)

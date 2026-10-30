@@ -261,6 +261,8 @@ class ProfessionalTests(unittest.TestCase):
         with server.conn() as c:
             c.execute("UPDATE employees SET contract_start='2026-10-01',contract_end='2026-10-26',carryover=0 WHERE id=2")
             c.execute("UPDATE contracts SET start_date='2026-10-01',end_date='2026-10-26',opening=0 WHERE employee_id=2")
+            # This fixture represents a new short contract with no saved prior accrual.
+            c.execute('DELETE FROM leave_accrual_cutover WHERE contract_id IN (SELECT id FROM contracts WHERE employee_id=2)')
         self.assertEqual(self.admin('employee-transfer',body)[0],200)
         self.assertEqual(self.employee('me')[0],401)
         person=self.client('employee','Employee@123')
