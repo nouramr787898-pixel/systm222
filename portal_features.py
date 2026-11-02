@@ -67,25 +67,101 @@ def period(question,core):
     return start,end
 
 
+REQUEST_KINDS={'annual_leave':'إجازة سنوية','sick_leave':'إجازة مرضية','unpaid_leave':'إجازة غير مدفوعة','advance':'سلفة','permission':'استئذان','punch_fix':'تصحيح بصمة','termination':'إنهاء تعاقد','delegation':'انتداب','hr_contact':'تواصل مع الموارد البشرية','investigation':'تحقيق','open':'طلب مفتوح'}
+REQUEST_STATES={'new':'قيد المراجعة','pending':'قيد المراجعة','review':'قيد المراجعة','approved':'مقبول','rejected':'مرفوض','manager_approved':'بانتظار الإدارة','cancelled':'ملغي','closed':'مغلق','accepted':'مقبول','declined':'مرفوض'}
+
+
+def request_summary(c,u,question,core,employee_id=None,company_id=None):
+    start,end=period(question,core);q=normalize(question)
+    rows=[r for r in core.visible_requests(c,u) if start<=r['created_at'][:10]<=end and (employee_id is None or r['employee_id']==employee_id) and (company_id is None or r['company_id']==company_id)]
+    filters=[(x,states) for x,states in [('مرفوض',{'rejected','declined'}),('مقبول',{'approved','accepted'}),('معتمد',{'approved','accepted'}),('قيد المراجعه',{'new','pending','review','manager_approved'}),('معلق',{'new','pending','review','manager_approved'})] if x in q]
+    if filters:rows=[r for r in rows if r['status'] in set.union(*(states for _,states in filters))]
+    out=[f'ملخص الطلبات الواردة من {start} إلى {end} ضمن صلاحيات حسابك: {len(rows)} طلب.']
+    if not rows:return {'answer':'\n'.join(out+['لا توجد طلبات مطابقة في هذه الفترة.']),'from':start,'to':end}
+    from collections import Counter
+    states=Counter(REQUEST_STATES.get(r['status'],r['status']) for r in rows)
+    kinds=Counter(REQUEST_KINDS.get(r['type'],r['type']) for r in rows)
+    out+=['الحالات: '+ '، '.join(f'{k}: {v}' for k,v in states.items()),'الأنواع: '+ '، '.join(f'{k}: {v}' for k,v in kinds.items())]
+    for r in rows[:30]:out.append(f"• طلب #{r['id']} — {r['employee_name']} ({r['employee_no']}) — {r['company_name']} — {REQUEST_KINDS.get(r['type'],r['type'])} — {REQUEST_STATES.get(r['status'],r['status'])}.")
+    if len(rows)>30:out.append(f'عُرض أحدث 30 طلبًا من {len(rows)}؛ حدّد موظفًا أو فترة أقصر للتفاصيل.')
+    return {'answer':'\n'.join(out),'from':start,'to':end}
+
+
+def system_summary(c,u,question,core,people,company_id=None):
+    q=normalize(question);start,end=period(question,core)
+    if 'طلب' in q:return request_summary(c,u,question,core,company_id=company_id)
+    if any(word in q for word in ('السيستم','النظام','ملخص عام')):
+        result=request_summary(c,u,question,core,company_id=company_id);result['answer']=f"الموظفون المتاحون {len(people)}، الشركات {len({e['company_id'] for e in people})}.\n"+result['answer'];return result
+    if any(word in q for word in ('حضر','حضور','غاب','غياب','حاضر','غائب')):
+        out=[f'ملخص الحضور من {start} إلى {end} ضمن صلاحيات حسابك:'];count=0
+        for e in people:
+            rows=c.execute('SELECT day,check_in,check_out FROM attendance WHERE employee_id=? AND day BETWEEN ? AND ? ORDER BY day',(e['id'],start,end)).fetchall()
+            present=sum(bool(r['check_in']) for r in rows);count+=present
+            if start==end:out.append(f"• {e['name']} ({e['employee_no']}) — {e['company_name']}: "+('حاضر' if present else 'لم يسجل حضورًا')+'.')
+            else:
+                missing=core.hr.scan_absences(c,e,start,end,core)
+                out.append(f"• {e['name']} ({e['employee_no']}) — {e['company_name']}: حضور {present} يوم، غياب معتمد {sum(r['status']=='approved' for r in missing)}، أيام بانتظار المراجعة {sum(r['status']=='pending' for r in missing)}.")
+        out.insert(1,f'إجمالي أيام الحضور المسجلة: {count}. عدم وجود بصمة لا يثبت غيابًا معتمدًا.')
+        return {'answer':'\n'.join(out),'from':start,'to':end}
+    if any(word in q for word in ('موظف','موظفين','شرك','شركات')):
+        return {'answer':f"الموظفون المتاحون لحسابك: {len(people)}، الشركات: {len({e['company_id'] for e in people})}.\n"+'\n'.join(f"• {e['name']} ({e['employee_no']}) — {e['company_name']} — {e['job']}" for e in people)}
+    if any(word in q for word in ('اجاز','ارصده','رواتب','راتب','عقد')):
+        lines=[]
+        for e in people:
+            if 'اجاز' in q or 'ارصده' in q:detail=f"رصيد الإجازات {core.leave(c,e)['available']} يوم"
+            elif 'عقد' in q:detail=f"العقد من {e['contract_start']} إلى {e['contract_end']}"
+            else:detail=f"إجمالي الراتب {core.salary(e)} ريال"
+            lines.append(f"• {e['name']} ({e['employee_no']}) — {e['company_name']}: {detail}.")
+        return {'answer':'\n'.join(lines) or 'لا توجد بيانات متاحة لحسابك.'}
+    return None
+
+
 def answer(c,u,d,core):
     question=str(d.get('question','')).strip()
     if not question or len(question)>2000:core.fail('اكتب سؤالًا لا يتجاوز 2000 حرف')
+    original_question=question
     q=normalize(question);people=core.visible_employees(c,u)
+    company_id=int(d['company_id']) if d.get('company_id') not in (None,'') else None
+    if company_id is not None:
+        allowed={r['id'] for r in c.execute('SELECT id FROM companies WHERE archived=0')} if u['role']=='admin' else {u['company_id']}
+        if company_id not in allowed:core.fail('الشركة غير متاحة لحسابك',403)
+        people=[e for e in people if e['company_id']==company_id]
+
+    # A typed employee number after disambiguation continues the previous question.
+    request_number=re.search(r'(?:الطلب|طلب)\s*(?:رقم|#)?\s*(\d+)',q)
+    if request_number:
+        target=next((r for r in core.visible_requests(c,u) if r['id']==int(request_number[1]) and (company_id is None or r['company_id']==company_id)),None)
+        if not target:return {'answer':'الطلب غير موجود ضمن السجلات المتاحة لحسابك.'}
+        return {'answer':f"طلب #{target['id']} — {target['employee_name']} ({target['employee_no']}) — {target['company_name']}.\nالنوع: {REQUEST_KINDS.get(target['type'],target['type'])}، الحالة: {REQUEST_STATES.get(target['status'],target['status'])}.\nتاريخ الإنشاء: {target['created_at'][:10]}.\nالملاحظات: {target['notes'] or 'لا توجد'}."}
+    previous=str(d.get('previous_question') or '')[:2000]
+    code_only=re.fullmatch(r'[\w-]+(?:\s*\([\w-]+\))?',question) or any(q in (normalize(e['name']),normalize(e['employee_no']),normalize(e['name'])+' ('+normalize(e['employee_no'])+')') for e in people)
+    if previous and code_only:question=previous+' '+original_question;q=normalize(question)
+
     matches=[e for e in people if (e['employee_no'] and re.search(r'(?<![\w-])'+re.escape(normalize(e['employee_no']))+r'(?![\w-])',q)) or normalize(e['name']) in q or (e['name_en'] and normalize(e['name_en']) in q)]
+    exact_codes=[e for e in people if e['employee_no'] and re.search(r'(?<![\w-])'+re.escape(normalize(e['employee_no']))+r'(?![\w-])',normalize(original_question))]
+    if exact_codes:matches=exact_codes
     if not matches:
         ignored={'الدكتور','دكتور','الموظف','موظف','الموظفه','موظفه','السيد','السيده','د','د.'}
         words=set(re.findall(r'[\w]+',q))-ignored
+        hint=re.search(r'(?:^|\s)(?:هل|الموظف|الموظفه|الدكتور|دكتور)\s+(.+?)(?=\s+(?:حضر|حضرت|حاضر|حاضره|غاب|غابت|اليوم|النهارده)|[؟?]|$)',q)
+        name_words=set(re.findall(r'[\w]+',hint[1]))-ignored if hint else set()
         for e in people:
             parts=set(normalize(e['name']).split())-ignored
-            if parts and parts.intersection(words):matches.append(e)
+            if parts and (name_words.issubset(parts) if name_words else parts.intersection(words)):matches.append(e)
+    if not matches and previous and d.get('context_employee_id') is not None and not any(x in q for x in ('الموظفين','لخص','ملخص','جميع','كل الموظف')):
+        matches=[e for e in people if e['id']==int(d['context_employee_id'])]
     if d.get('employee_id') is not None:
         eid=int(d['employee_id']);matches=[e for e in people if e['id']==eid]
     if not matches and d.get('employee_id') is None and u['role']=='employee' and any(x in q for x in ('حضوري','غيابي','راتبي','اجازاتي','طلباتي','رصيدي','بياناتي')):matches=people
-    if len(matches)>1:return {'answer':'يوجد أكثر من موظف مطابق؛ اختر الموظف المقصود.','choices':[{'id':e['id'],'name':e['name'],'employee_no':e['employee_no'],'company_name':e['company_name']} for e in matches]}
+    if len(matches)>1:return {'answer':'يوجد أكثر من موظف مطابق؛ اختر الموظف المقصود.','context_question':question,'choices':[{'id':e['id'],'name':e['name'],'employee_no':e['employee_no'],'company_name':e['company_name']} for e in matches]}
     if not matches:
-        if any(x in q for x in ('عدد الموظفين','كم موظف','عدد الشركات')):return {'answer':f"الموظفون المتاحون لحسابك: {len(people)}، الشركات: {len({e['company_id'] for e in people})}."}
-        return {'answer':'لم أجد موظفًا مطابقًا ضمن البيانات المتاحة لحسابك. اذكر الاسم أو الرقم الوظيفي المسجل.'}
+        # A summary is a system query, not an employee lookup.
+        general=system_summary(c,u,question,core,people,company_id=company_id)
+        if d.get('employee_id') is None and general and any(x in q for x in ('لخص','ملخص','الموظفين','الوارد','عدد الشركات','كم موظف','عدد الموظفين','الرواتب','الحضور اليوم','الحاضرين','الغائبين','مين حضر','من حضر','مين غاب','من غاب','مين حاضر','من حاضر','مين غائب','من غائب','السيستم','النظام','ملخص عام','طلبات اليوم','الطلبات اليوم')):return general
+        return {'answer':'لم أجد الموظف المطلوب ضمن البيانات المتاحة لحسابك. اذكر اسمه المسجل أو رقمه الوظيفي.'}
     e=matches[0];core.user_allowed_emp(c,u,e['id']);start,end=period(question,core)
+    if 'طلب' in q:
+        result=request_summary(c,u,question,core,e['id'],company_id=company_id);result['employee_id']=e['id'];result['context_question']=question;return result
     rows=[dict(r) for r in c.execute('SELECT * FROM attendance WHERE employee_id=? AND day BETWEEN ? AND ? ORDER BY day',(e['id'],start,end))]
     out=[f"{e['name']} ({e['employee_no']}) — شركة {e['company_name']}."]
     if start==end:
@@ -116,13 +192,8 @@ def answer(c,u,d,core):
     if any(x in q for x in ('مستند','ملف','وثيق')):
         files=[r['name'] for r in c.execute('SELECT name FROM employee_files WHERE employee_id=? ORDER BY id',(e['id'],))]
         out.append('المستندات المسجلة: '+('، '.join(files) or 'لا توجد مستندات')+'.')
-    if 'طلب' in q:
-
-        requests=[r for r in core.visible_requests(c,u) if r['employee_id']==e['id'] and start<=r['created_at'][:10]<=end]
-        labels={'new':'قيد المراجعة','pending':'قيد المراجعة','approved':'مقبول','rejected':'مرفوض','review':'قيد المراجعة','manager_approved':'بانتظار الإدارة','cancelled':'ملغي','closed':'مغلق','accepted':'مقبول','declined':'مرفوض'}
-        out.append('الطلبات خلال الفترة: '+('؛ '.join(f"رقم {r['id']} ({r['type']}): {labels.get(r['status'],r['status'])}" for r in requests) or 'لا توجد طلبات مسجلة')+'.')
     out.append('المصدر: السجلات المتاحة لحسابك. موقع البصمة ليس تتبعًا للموقع الحالي.')
-    return {'answer':'\n'.join(out),'employee_id':e['id'],'from':start,'to':end}
+    return {'answer':'\n'.join(out),'employee_id':e['id'],'from':start,'to':end,'context_question':question}
 
 
 def handle(h,c,u,path,method,core):

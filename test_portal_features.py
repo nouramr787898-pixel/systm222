@@ -34,6 +34,49 @@ class PortalFeatureTests(unittest.TestCase):
         out=self.admin('assistant',{'question':'هل سارة حاضرة؟','employee_id':2})[1]
         self.assertEqual(out['employee_id'],2)
 
+    def test_system_request_summary_reads_live_rows_and_permissions(self):
+        rid=self.create()
+        with server.conn() as c:
+            c.execute('UPDATE requests SET created_at=? WHERE id=?',(server.TODAY().isoformat()+'T09:00:00',rid))
+        out=self.admin('assistant',{'question':'لخص ليا الطلبات الواردة من الموظفين اليوم'})[1]
+        self.assertIn('1 طلب',out['answer']);self.assertIn(f'طلب #{rid}',out['answer']);self.assertIn('سارة خالد',out['answer']);self.assertIn('طلب مفتوح',out['answer'])
+        self.assertNotIn('اذكر الاسم',out['answer'])
+        private=self.employee('requests',{'employee_id':2,'type':'hr_contact','notes':'رسالة خاصة'})[1]['id']
+        with server.conn() as c:c.execute('UPDATE requests SET created_at=? WHERE id=?',(server.TODAY().isoformat()+'T09:00:00',private))
+        manager=self.manager('assistant',{'question':'لخص الطلبات الواردة اليوم'})[1]['answer']
+        self.assertIn(f'طلب #{rid}',manager);self.assertNotIn(f'طلب #{private}',manager)
+
+    def test_company_selection_scopes_people_requests_and_followup(self):
+        own=self.create()
+        with server.conn() as c:
+            company=c.execute("INSERT INTO companies(name) VALUES('شركة ثانية')").lastrowid
+            c.execute('UPDATE employees SET company_id=?,manager_id=NULL WHERE id=3',(company,))
+        code,other=self.admin('requests',{'employee_id':3,'type':'open','notes':'طلب الشركة الثانية'})
+        self.assertEqual(code,201)
+        with server.conn() as c:c.execute('UPDATE requests SET created_at=?',(server.TODAY().isoformat()+'T09:00:00',))
+        answer=self.admin('assistant',{'question':'لخص الطلبات الواردة اليوم','company_id':1})[1]['answer']
+        self.assertIn(f'طلب #{own}',answer);self.assertNotIn(f"طلب #{other['id']}",answer)
+        answer=self.admin('assistant',{'question':'لخص الطلبات الواردة اليوم','company_id':company})[1]['answer']
+        self.assertNotIn(f'طلب #{own}',answer);self.assertIn(f"طلب #{other['id']}",answer)
+        self.assertEqual(self.manager('assistant',{'question':'لخص الطلبات اليوم','company_id':company})[0],403)
+        answer=self.admin('assistant',{'question':f"تفاصيل طلب رقم {other['id']}",'company_id':1})[1]['answer']
+        self.assertIn('غير موجود',answer)
+        answer=self.admin('assistant',{'question':'هل خالد علي حضر اليوم','company_id':1})[1]['answer']
+        self.assertIn('لم أجد',answer)
+
+    def test_typed_code_continues_original_question_and_followup(self):
+        with server.conn() as c:
+            c.execute("UPDATE employees SET name='دكتور ياسر' WHERE id IN (2,3)")
+            c.execute("INSERT INTO attendance(employee_id,day,check_in,check_out,source) VALUES(2,?,'20:19:00','20:19:01','gps_geofence')",(server.TODAY().isoformat(),))
+        question='هل الموظف دكتور ياسر حضر اليوم؟'
+        out=self.admin('assistant',{'question':question})[1];self.assertEqual(len(out['choices']),2)
+        resolved=self.admin('assistant',{'question':'دكتور ياسر (EH-0002)','previous_question':question})[1]
+        self.assertIn('نعم، مسجل له حضور',resolved['answer']);self.assertEqual(resolved['employee_id'],2)
+        follow=self.admin('assistant',{'question':'ورصيده كام؟','previous_question':question,'context_employee_id':2})[1]
+        self.assertIn('رصيد الإجازات المتاح',follow['answer'])
+        summary=self.admin('assistant',{'question':'لخص الطلبات الواردة اليوم','previous_question':question,'context_employee_id':2})[1]
+        self.assertIn('ملخص الطلبات',summary['answer']);self.assertNotIn('employee_id',summary)
+
     def test_selected_sites_authorization_and_both_punches(self):
         a=self.admin('sites?company_id=1',{'name':'المكتب الأول','latitude':30.1390381,'longitude':31.2558794,'radius':100})[1][0]
         b=self.admin('sites?company_id=1',{'name':'المكتب الثاني','latitude':31,'longitude':32,'radius':100})[1][-1]
