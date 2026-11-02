@@ -1,7 +1,7 @@
 """EHKAM HR Portal - local functional prototype. Run: python server.py"""
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import hr, sys, calendar, gps_location
+import hr, sys, calendar, gps_location, portal_features
 import sqlite3, json, os, hashlib, hmac, secrets, datetime, csv, io, threading, re, time, ssl, smtplib, urllib.request, urllib.parse, urllib.error, base64, html, math
 from email.message import EmailMessage
 from http.cookies import SimpleCookie
@@ -109,6 +109,8 @@ def init(seeder=None,allow_create=False):
  if not c.in_transaction:c.execute('BEGIN IMMEDIATE')
  migrate_workflow(c)
  hr.migrate(c)
+ portal_features.migrate(c)
+ portal_features.purge_expired(c,TODAY().isoformat())
  c.commit();c.close()
 
 def migrate_workflow(c):
@@ -438,10 +440,11 @@ class Handler(BaseHTTPRequestHandler):
   if method=='GET' and path=='/i18n.js':return self.write((BASE/'i18n.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/hr-ui.js':return self.write((BASE/'hr-ui.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/app.js':return self.write((BASE/'app.js').read_bytes(),ctype='text/javascript')
-  if method=='GET' and path in ('/favicon.ico','/favicon.png','/ehkam-icon.png','/ehkam-logo-full.png'):
+  if method=='GET' and path in ('/ehkam-logo-transparent.png','/favicon.ico','/favicon.png','/ehkam-icon.png','/ehkam-logo-full.png'):
    return self.write((BASE/path.lstrip('/')).read_bytes(),ctype='image/x-icon' if path.endswith('.ico') else 'image/png')
   c=conn()
   try:
+   if portal_features.public(self,c,path,method,sys.modules[__name__]):return
    if method=='POST' and path=='/api/login':
     d=self.input();u=c.execute('SELECT * FROM users WHERE username=?',(str(d.get('username','')).strip(),)).fetchone()
     if not u or not verifypw(d.get('password',''),u['password_hash']) or u['role']!=d.get('account_role'):fail('بيانات الدخول أو نوع الحساب غير صحيحة',401)
@@ -571,6 +574,7 @@ class Handler(BaseHTTPRequestHandler):
       if uid==u['id']:SESSIONS.pop(token,None)
     record(c,u,'password_reset','user',u['id']);c.commit();return self.write({'ok':True})
    u=self.actor(c)
+   if portal_features.handle(self,c,u,path,method,sys.modules[__name__]):return
    if hr.handle(self,c,u,path,method,sys.modules[__name__]):return
    if path=='/api/supervisors' and method=='GET':
     if u['role']!='admin':fail('غير مصرح',403)
@@ -647,7 +651,7 @@ class Handler(BaseHTTPRequestHandler):
    if path.startswith('/api/employees/') and method=='POST':
     if u['role']!='admin':fail('غير مصرح',403)
     eid=int(path.rsplit('/',1)[1]);e=user_allowed_emp(c,u,eid);d=normalize_employee_fields(self.input())
-    permitted={'passport','nationality','birth_date','qualification','specialization','branch','iban','bank_name','phone_country','phone_local','email','schedule_id','site_id','photo','name','name_en','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method'}
+    permitted={'allowed_site_ids','passport','nationality','birth_date','qualification','specialization','branch','iban','bank_name','phone_country','phone_local','email','schedule_id','site_id','photo','name','name_en','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method'}
     if any(key in d for key in ('phone_country','phone_local','email')):
      country,phone,email=clean_contacts({**dict(e),**d});d.update(phone_country=country,phone_local=phone,email=email)
     for field,table in [('schedule_id','schedules'),('site_id','work_sites')]:
@@ -657,6 +661,7 @@ class Handler(BaseHTTPRequestHandler):
       item=c.execute('SELECT * FROM '+table+' WHERE id=? AND company_id=?',(d[field],e['company_id'])).fetchone()
       if not item:fail('الجدول أو الموقع لا يتبع شركة الموظف')
       if field=='schedule_id':d.update(workweek=item['workweek'],work_start=item['work_start'],work_end=item['work_end'])
+    if 'allowed_site_ids' in d:d['allowed_site_ids']=portal_features.validate_sites(c,e,d['allowed_site_ids'],sys.modules[__name__])
     changes={k:v for k,v in d.items() if k in permitted}
     start=changes.get('contract_start',e['contract_start']);end=changes.get('contract_end',e['contract_end'])
     if start and end and end<start:fail('نهاية العقد قبل بدايته')
@@ -817,10 +822,13 @@ class Handler(BaseHTTPRequestHandler):
     if not e:fail('ملف الموظف أو الشركة غير متاح',403)
     ended=hr.employment_end(c,e)
     if ended and ended<TODAY().isoformat():fail('انتهت خدمة الموظف ولا يمكن تسجيل بصمة جديدة',403)
-    if e['site_id']:
-     site=c.execute('SELECT * FROM work_sites WHERE id=? AND company_id=?',(e['site_id'],e['company_id'])).fetchone()
-     if not site:fail('موقع العمل غير صالح')
-     e=dict(e);e.update(company_lat=site['latitude'],company_lon=site['longitude'],geofence_radius=site['radius'])
+    available=portal_features.sites(c,e)
+    if not available:fail('لم يحدد المدير موقعًا صالحًا للبصمة')
+    if 'site_id' not in d and len(available)>1:fail('اختر موقع البصمة')
+    selected=int(d.get('site_id',available[0]['id']))
+    site=next((x for x in available if x['id']==selected),None)
+    if not site:fail('الموقع غير مسموح لهذا الموظف',403)
+    e=dict(e);e.update(company_lat=site['latitude'],company_lon=site['longitude'],geofence_radius=site['radius'])
     if e['company_lat'] is None or e['company_lon'] is None:fail('لم يحدد المدير موقع الشركة بعد')
     r=6371000.0
     p1=math.radians(lat);p2=math.radians(float(e['company_lat']))
@@ -832,10 +840,10 @@ class Handler(BaseHTTPRequestHandler):
     day=TODAY().isoformat();stamp=datetime.datetime.now().strftime('%H:%M:%S')
     row=c.execute('SELECT * FROM attendance WHERE employee_id=? AND day=?',(e['id'],day)).fetchone()
     if not row:
-     c.execute('INSERT INTO attendance(employee_id,day,check_in,source) VALUES(?,?,?,?)',(e['id'],day,stamp,'gps_geofence'))
+     c.execute('INSERT INTO attendance(employee_id,day,check_in,source,check_in_site) VALUES(?,?,?,?,?)',(e['id'],day,stamp,'gps_geofence',site['name']))
      action='check_in';message='تم تسجيل الحضور بنجاح'
     elif not row['check_out']:
-     c.execute('UPDATE attendance SET check_out=?,source=? WHERE id=?',(stamp,'gps_geofence',row['id']))
+     c.execute('UPDATE attendance SET check_out=?,source=?,check_out_site=? WHERE id=?',(stamp,'gps_geofence',site['name'],row['id']))
      action='check_out';message='تم تسجيل الانصراف بنجاح'
     else:fail('تم تسجيل الحضور والانصراف لهذا اليوم بالفعل')
     record(c,u,action,'attendance',e['id'],'distance_m='+str(round(distance,1))+'; accuracy_m='+str(round(accuracy,1)))
@@ -879,6 +887,9 @@ class Handler(BaseHTTPRequestHandler):
   finally:c.close()
 
 if __name__=='__main__':
- validate_runtime_database();init();port=int(os.environ.get('PORT','8765'))
+ validate_runtime_database();init()
+ import notification_worker
+ notification_worker.start_background(conn)
+ port=int(os.environ.get('PORT','8765'))
  print(f'EHKAM working local server: http://127.0.0.1:{port}');# Never print credentials into public hosting logs
  ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()

@@ -5,6 +5,7 @@ import datetime as dt
 import io
 import json
 import math
+import os
 import re
 import zipfile
 from xml.sax.saxutils import escape
@@ -155,11 +156,28 @@ def notify(c,r,core,message,actor=None):
         person=c.execute('SELECT display_name,username,role FROM users WHERE id=?',(actor['id'],)).fetchone()
         role={'admin':'أدمن','manager':'مشرف','employee':'موظف'}[person['role']]
         message+=f" · بواسطة {person['display_name'] or person['username']} ({person['username']} — {role})"
+    # WhatsApp uses an approved Meta utility template, never the OTP provider.
+    contact=c.execute('SELECT u.id,e.phone_country,e.phone_local FROM users u JOIN employees e ON e.id=u.employee_id WHERE e.id=? ORDER BY u.id LIMIT 1',(r['employee_id'],)).fetchone()
+    if contact:
+        country=str(contact['phone_country'] or '').lstrip('+');local=re.sub(r'\D','',str(contact['phone_local'] or '')).lstrip('0')
+        if re.fullmatch(r'[1-9]\d{7,14}',country+local):
+            current=c.execute('SELECT status FROM requests WHERE id=?',(r['id'],)).fetchone()[0]
+            status={'new':'قيد المراجعة','pending':'قيد المراجعة','review':'قيد المراجعة','approved':'تم القبول','rejected':'مرفوض','manager_approved':'قيد المراجعة لدى الإدارة','accepted':'تم القبول','declined':'مرفوض','cancelled':'ملغي','closed':'مغلق'}.get(current,current)
+            parameters=[str(r['id']),kinds.get(r['type'],r['type']),employee['employee_no'],status]
+            c.execute('INSERT INTO whatsapp_outbox(user_id,request_id,destination,parameters,created_at) VALUES(?,?,?,?,?)',(contact['id'],r['id'],country+local,json.dumps(parameters,ensure_ascii=False),core.now()))
     for uid in recipients:
         c.execute('INSERT INTO notifications(user_id,request_id,message,created_at) VALUES(?,?,?,?)',(uid,r['id'],message,core.now()))
         contact=c.execute('SELECT e.email FROM users u JOIN employees e ON e.id=u.employee_id WHERE u.id=?',(uid,)).fetchone()
         if contact and re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',contact[0] or ''):
-            c.execute('INSERT INTO email_outbox(user_id,request_id,destination,subject,created_at) VALUES(?,?,?,?,?)',(uid,r['id'],contact[0],message+f" EH-{r['id']:06d}",core.now()))
+            employee_user=c.execute('SELECT employee_id FROM users WHERE id=?',(uid,)).fetchone()[0]==r['employee_id']
+            current=c.execute('SELECT status FROM requests WHERE id=?',(r['id'],)).fetchone()[0]
+            status={'new':'قيد المراجعة','pending':'قيد المراجعة','review':'قيد المراجعة','approved':'تم القبول','rejected':'مرفوض','manager_approved':'قيد المراجعة لدى الإدارة','cancelled':'ملغي','accepted':'تم القبول','declined':'مرفوض','closed':'مغلق'}.get(current,current)
+            from urllib.parse import urlparse
+            origin=os.environ.get('EHKAM_PUBLIC_URL','').rstrip('/')
+            parsed=urlparse(origin)
+            link=origin+f"/#request-{r['id']}" if parsed.scheme=='https' and parsed.netloc and not parsed.username and not parsed.password else 'يرجى الدخول إلى موقع إحكام المسار لعرض الطلب.'
+            body=(f"موظفنا العزيز،\nنفيدكم بأن طلبكم رقم ({r['id']}) الخاص بطلب ({kinds.get(r['type'],r['type'])}) بالرقم الوظيفي ({employee['employee_no']}) حالته: {status}.\nلمزيد من التفاصيل يرجى زيارة موقع إحكام المسار عبر الرابط\n{link}\nإحكام المسار، نسعد بخدمتكم" if employee_user else message)
+            c.execute('INSERT INTO email_outbox(user_id,request_id,destination,subject,body,created_at) VALUES(?,?,?,?,?,?)',(uid,r['id'],contact[0],message+f" EH-{r['id']:06d}",body,core.now()))
 
 
 def coverage(c,eid,day):

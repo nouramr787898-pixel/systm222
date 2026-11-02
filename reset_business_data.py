@@ -18,6 +18,7 @@ import production_db
 import server
 
 CLEAR_TABLES=(
+    'applications','vacancies','whatsapp_outbox',
     'request_attachments','request_decisions','request_comments','employee_files',
     'email_outbox','notifications','settlements','absences','overtime_reviews',
     'attendance','password_resets','employee_number_history','requests','contracts',
