@@ -23,7 +23,7 @@ CLEAR_TABLES=(
     'loan_repayments','payroll_events','payroll_lines','payroll_runs','loans','pay_adjustments',
     'employee_terms','lifecycle_tasks','employee_assets','auth_sessions','login_limits',
     'request_attachments','request_decisions','request_comments','employee_files',
-    'email_outbox','notifications','settlements','absences','overtime_reviews',
+    'whatsapp_outbox','email_outbox','notifications','settlements','absences','overtime_reviews',
     'attendance','password_resets','employee_number_history','requests','contracts',
     'schedules','work_sites','holidays','employees','companies','audit',
 )

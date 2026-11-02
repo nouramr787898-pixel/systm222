@@ -209,4 +209,4 @@ def attendance_metrics(c,e,row):
         departure=dt.datetime.combine(date,dt.time.fromisoformat(row['check_out']))
         if overnight and departure<start:departure+=dt.timedelta(days=1)
     hours=max(0,(departure-arrival).total_seconds()/3600) if arrival and departure else 0
-    return {'hours':round(hours,2),'late':bool(arrival and arrival>start),'early_out':bool(departure and departure<end)}
+    return {'duration_seconds':int(round(hours*3600)),'hours':round(hours,2),'late':bool(arrival and arrival>start),'early_out':bool(departure and departure<end)}

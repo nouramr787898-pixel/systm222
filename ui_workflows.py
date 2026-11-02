@@ -80,6 +80,7 @@ def attendance_calendar(c,e,start,end,core,clock=None):
             status='awaiting' if clock<finish else 'absent'
             item['can_review']=status=='absent' and iso in reviewable
             if decision and decision['status']=='approved':status='approved_absence';item['can_review']=False
+        item['duration_seconds']=workforce.attendance_metrics(c,e,entry)['duration_seconds'] if entry else 0
         item['status']=status;result.append(item)
     return result
 

@@ -96,6 +96,8 @@ def public(h,c,path,method,core):
     if c.execute('SELECT 1 FROM candidates WHERE vacancy_id=? AND lower(email)=?',(v['id'],email)).fetchone():core.fail('سبق التقديم على هذه الوظيفة',409)
     # Keep existing NOT NULL creator FK: creator is the vacancy owner; audit identifies public submission.
     c.execute('''INSERT INTO candidates(vacancy_id,name,email,phone,status,note,consent_on,retention_until,created_by,created_at,cv_name,cv_content) VALUES(?,?,?,?,'applied',?,?,?,?,?,?,?)''',(v['id'],name,email,'+966'+phone[1:],str(d.get('note',''))[:2000],core.TODAY().isoformat(),v['retention_until'],v['created_by'],core.now(),filename[:200],content))
+    import delivery_updates
+    c.execute('UPDATE candidates SET consent_text=? WHERE id=last_insert_rowid()',(delivery_updates.CONSENT,))
     core.record(c,{'id':None,'username':'public-applicant','role':'public'},'public_application','company',v['company_id'],{'vacancy_id':v['id']});c.commit();h.write({'ok':True},201);return True
 
 def handle(h,c,u,path,method,core):

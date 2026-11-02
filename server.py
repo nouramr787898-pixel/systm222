@@ -2,7 +2,7 @@
 import requested_batch
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import ai_assistant, hr, sys, calendar, gps_location, security, workforce, payroll, talent, directory_tools, permissions, ui_workflows
+import delivery_updates, ai_assistant, hr, sys, calendar, gps_location, security, workforce, payroll, talent, directory_tools, permissions, ui_workflows
 import sqlite3, json, os, hashlib, hmac, secrets, datetime, csv, io, threading, re, time, ssl, smtplib, urllib.request, urllib.parse, urllib.error, base64, html, math
 from email.message import EmailMessage
 from http.cookies import SimpleCookie
@@ -132,7 +132,7 @@ def init(seeder=None,allow_create=False):
  if not c.in_transaction:c.execute('BEGIN IMMEDIATE')
  migrate_workflow(c)
  hr.migrate(c)
- workforce.migrate(c);security.migrate(c);payroll.migrate(c);talent.migrate(c);directory_tools.migrate(c);permissions.migrate(c);requested_batch.migrate(c);requested_batch.capture_leave_cutover(c,sys.modules[__name__])
+ workforce.migrate(c);security.migrate(c);payroll.migrate(c);talent.migrate(c);directory_tools.migrate(c);permissions.migrate(c);requested_batch.migrate(c);delivery_updates.migrate(c);requested_batch.capture_leave_cutover(c,sys.modules[__name__])
  c.commit();c.close()
 
 def migrate_workflow(c):
@@ -620,7 +620,7 @@ class Handler(BaseHTTPRequestHandler):
   if method=='GET' and path=='/ux-controls.js':return self.write((BASE/'ux-controls.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/intro.js':return self.write((BASE/'intro.js').read_bytes(),ctype='text/javascript')
   if method=='GET' and path=='/app.js':return self.write((BASE/'app.js').read_bytes(),ctype='text/javascript')
-  if method=='GET' and path in ('/favicon.ico','/favicon.png','/ehkam-icon.png','/ehkam-logo-full.png'):
+  if method=='GET' and path in ('/ehkam-logo-transparent.png','/favicon.ico','/favicon.png','/ehkam-icon.png','/ehkam-logo-full.png'):
    return self.write((BASE/path.lstrip('/')).read_bytes(),ctype='image/x-icon' if path.endswith('.ico') else 'image/png')
   c=conn()
   try:
@@ -858,7 +858,7 @@ class Handler(BaseHTTPRequestHandler):
    if path.startswith('/api/employees/') and method=='POST':
     if u['role']!='admin':fail('غير مصرح',403)
     eid=int(path.rsplit('/',1)[1]);e=user_allowed_emp(c,u,eid);d=normalize_employee_fields(self.input())
-    permitted={'passport','nationality','birth_date','qualification','specialization','branch','iban','bank_name','phone_country','phone_local','email','schedule_id','site_id','photo','name','name_en','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method'}
+    permitted={'allowed_site_ids','passport','nationality','birth_date','qualification','specialization','branch','iban','bank_name','phone_country','phone_local','email','schedule_id','site_id','photo','name','name_en','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method'}
     if any(key in d for key in ('phone_country','phone_local','email')):
      country,phone,email=clean_contacts({**dict(e),**d,'_legacy_phone':e['phone_local']});d.update(phone_country=country,phone_local=phone,email=email)
     for field,table in [('schedule_id','schedules'),('site_id','work_sites')]:
@@ -868,6 +868,7 @@ class Handler(BaseHTTPRequestHandler):
       item=c.execute('SELECT * FROM '+table+' WHERE id=? AND company_id=?',(d[field],e['company_id'])).fetchone()
       if not item:fail('الجدول أو الموقع لا يتبع شركة الموظف')
       if field=='schedule_id':d.update(workweek=item['workweek'],work_start=item['work_start'],work_end=item['work_end'])
+    if 'allowed_site_ids' in d:d['allowed_site_ids']=delivery_updates.validate_sites(c,e,d['allowed_site_ids'],sys.modules[__name__])
     changes={k:v for k,v in d.items() if k in permitted}
     start=changes.get('contract_start',e['contract_start']);end=changes.get('contract_end',e['contract_end'])
     if start and end and end<start:fail('نهاية العقد قبل بدايته')
@@ -1039,8 +1040,10 @@ class Handler(BaseHTTPRequestHandler):
      hr.reconcile_absences(c,e['id'],r['start_date'],r['end_date'],sys.modules[__name__])
     hr.notify(c,r,sys.modules[__name__],'تم تحديث الطلب: '+decision_status,u)
     record(c,u,'status_'+decision_status,'request',rid,d.get('note',''));c.commit();return self.write({'ok':True})
+   if path=='/api/attendance-sites' and method=='GET':
+    e=user_allowed_emp(c,u,u['employee_id'] or 0);return self.write(delivery_updates.sites(c,e))
    if path=='/api/attendance' and method=='GET':
-    qs=parse_qs(urlparse(self.path).query);eid=int(qs.get('employee_id',[u['employee_id'] or 0])[0]);user_allowed_emp(c,u,eid)
+    qs=parse_qs(urlparse(self.path).query);eid=int(qs.get('employee_id',[u['employee_id'] or 0])[0]);e=user_allowed_emp(c,u,eid)
     q='SELECT * FROM attendance WHERE employee_id=?';p=[eid]
     if qs.get('month'):
      month=qs['month'][0]
@@ -1049,7 +1052,7 @@ class Handler(BaseHTTPRequestHandler):
     if qs.get('day'):q+=' AND day=?';p.append(normalize_date(qs['day'][0]))
     if qs.get('from'):q+=' AND day>=?';p.append(normalize_date(qs['from'][0]))
     if qs.get('to'):q+=' AND day<=?';p.append(normalize_date(qs['to'][0]))
-    return self.write([dict(x) for x in c.execute(q+' ORDER BY day DESC',p)])
+    return self.write([{**dict(x),'duration_seconds':workforce.attendance_metrics(c,e,x)['duration_seconds']} for x in c.execute(q+' ORDER BY day DESC',p)])
    if path=='/api/attendance' and method=='POST':
     c.execute('BEGIN IMMEDIATE')
     if u['role']!='employee':fail('تسجيل البصمة من حساب الموظف فقط',403)
@@ -1064,10 +1067,12 @@ class Handler(BaseHTTPRequestHandler):
     if not e:fail('ملف الموظف أو الشركة غير متاح',403)
     ended=hr.employment_end(c,e)
     if ended and ended<TODAY().isoformat():fail('انتهت خدمة الموظف ولا يمكن تسجيل بصمة جديدة',403)
-    if e['site_id']:
-     site=c.execute('SELECT * FROM work_sites WHERE id=? AND company_id=?',(e['site_id'],e['company_id'])).fetchone()
-     if not site:fail('موقع العمل غير صالح')
-     e=dict(e);e.update(company_lat=site['latitude'],company_lon=site['longitude'],geofence_radius=site['radius'])
+    available=delivery_updates.sites(c,e)
+    if not available:fail('لم يحدد المدير موقعًا صالحًا للبصمة')
+    if 'site_id' not in d and len(available)>1:fail('اختر موقع البصمة')
+    site=next((x for x in available if x['id']==int(d.get('site_id',available[0]['id']))),None)
+    if not site:fail('الموقع غير مسموح للموظف',403)
+    e=dict(e);e.update(company_lat=site['latitude'],company_lon=site['longitude'],geofence_radius=site['radius'])
     if e['company_lat'] is None or e['company_lon'] is None:fail('لم يحدد المدير موقع الشركة بعد')
     r=6371000.0
     p1=math.radians(lat);p2=math.radians(float(e['company_lat']))
@@ -1090,13 +1095,13 @@ class Handler(BaseHTTPRequestHandler):
     if not row:
      if explicit=='check_out':fail('لا توجد بصمة حضور مفتوحة')
      if e['work_end']<=e['work_start'] and local_now.time()<datetime.time.fromisoformat(e['work_end']):fail('الوردية الليلية السابقة بلا حضور؛ اطلب تصحيح بصمة')
-     c.execute('INSERT INTO attendance(employee_id,day,check_in,source,check_in_at,schedule_snapshot) VALUES(?,?,?,?,?,?)',(e['id'],day,stamp,'gps_geofence',now(),json.dumps(workforce.snapshot(e))))
+     c.execute('INSERT INTO attendance(employee_id,day,check_in,source,check_in_at,schedule_snapshot,check_in_site) VALUES(?,?,?,?,?,?,?)',(e['id'],day,stamp,'gps_geofence',now(),json.dumps(workforce.snapshot(e)),site['name']))
      action='check_in';message='تم تسجيل الحضور بنجاح'
     elif not row['check_out']:
      if explicit=='check_in':fail('الحضور مسجل بالفعل')
      requested_batch.checkout_guard(c,e['id'],day,sys.modules[__name__])
      if row['check_in_at'] and (datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(row['check_in_at'])).total_seconds()<60:fail('راجع البصمة؛ لا يمكن تسجيل انصراف خلال دقيقة من الحضور')
-     c.execute('UPDATE attendance SET check_out=?,source=?,check_out_at=? WHERE id=?',(stamp,'gps_geofence',now(),row['id']))
+     c.execute('UPDATE attendance SET check_out=?,source=?,check_out_at=?,check_out_site=? WHERE id=?',(stamp,'gps_geofence',now(),site['name'],row['id']))
      action='check_out';message='تم تسجيل الانصراف بنجاح'
     else:fail('تم تسجيل الحضور والانصراف لهذا اليوم بالفعل')
     record(c,u,action,'attendance',e['id'],'distance_m='+str(round(distance,1))+'; accuracy_m='+str(round(accuracy,1)))
@@ -1169,6 +1174,9 @@ class ProductionHTTPServer(ThreadingHTTPServer):
   finally:self.slots.release()
 
 if __name__=='__main__':
- validate_runtime_database();init();port=int(os.environ.get('PORT','8765'))
+ validate_runtime_database();init()
+ import notification_worker
+ notification_worker.start_background(conn)
+ port=int(os.environ.get('PORT','8765'))
  print(f'EHKAM working local server: http://127.0.0.1:{port}');# Never print credentials into public hosting logs
  ProductionHTTPServer(('0.0.0.0',port),Handler).serve_forever()

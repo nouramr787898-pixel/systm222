@@ -1,5 +1,6 @@
 """Local rule-based guidance and scoped counts. No model, key or external calls."""
 import re
+import delivery_updates
 import threading
 import time
 import unicodedata
@@ -166,7 +167,7 @@ def saudi(text):
     return text
 
 
-def employee_facts_answer(c,u,question,core):
+def employee_facts_answer(c,u,question,core,company_id=None):
     """Read-only, deterministic employee facts. Every source keeps its role scope."""
     import datetime as dt
     q=normalize(question)
@@ -175,16 +176,18 @@ def employee_facts_answer(c,u,question,core):
     requests=contains(q,('طلب','طلبات','قدمت','قدم'))
     balance=contains(q,('رصيد','متراكم','اجمالي الاجازات'))
     contract=contains(q,('عقد','مسمى','قسم','اداره','وظيفته','وظيفتها','شركته','شركتها'))
+    attendance=attendance or contains(q,('غياب','غاب','حضوري'))
     if not any((attendance,advance,requests,balance,contract)) or contains(q,('كيف','ازاي','طريقه','خطوات')):return None
-    visible=core.visible_employees(c,u)
+    visible=[e for e in core.visible_employees(c,u) if company_id is None or e['company_id']==company_id]
     def phrase(value):return bool(re.search(r'(?<!\w)'+re.escape(normalize(value))+r'(?!\w)',q))
-    exact=[e for e in visible if phrase(e['name']) or phrase(e['employee_no'])]
+    codes=[e for e in visible if phrase(e['employee_no'])]
+    exact=codes or [e for e in visible if phrase(e['name'])]
     matches=exact or [e for e in visible if any(len(word)>1 and phrase(word) for word in e['name'].split())]
     if not matches:
         if contains(q,('رصيدي','طلباتي','حضرت انا','انا حضرت','سلفتي','عقدي')):matches=[e for e in visible if e['id']==u['employee_id']]
         elif not contains(q,('موظف','موظفه','شوف','شف ','وين','فين','هل ')):return None
     if not matches:return {'answer':'ما لقيت موظفًا بهذا الاسم ضمن الموظفين المسموح لك بالاطلاع عليهم. اكتب الاسم الكامل أو الرقم الوظيفي.','sources':['نطاق الموظفين المسموح لحسابك']}
-    if len(matches)>1:return {'answer':'أبشر، فيه أكثر من موظف بهذا الاسم: '+'، '.join(e['name']+' ('+e['employee_no']+')' for e in matches)+'. حدّد الاسم الكامل أو الرقم الوظيفي.','sources':['الموظفون ضمن صلاحيات الحساب']}
+    if len(matches)>1:return {'answer':'أبشر، فيه أكثر من موظف بهذا الاسم: '+'، '.join(e['name']+' ('+e['employee_no']+')' for e in matches)+'. حدّد الاسم الكامل أو الرقم الوظيفي.','sources':['الموظفون ضمن صلاحيات الحساب'],'choices':[{'id':e['id'],'name':e['name'],'employee_no':e['employee_no']} for e in matches]}
     e=matches[0];today=core.TODAY();start=end=today.isoformat();period='اليوم'
     raw=question.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩','0123456789'))
     date=re.search(r'\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4})\b',raw)
@@ -193,7 +196,7 @@ def employee_facts_answer(c,u,question,core):
     elif contains(q,('هذا الشهر','الشهر الحالي','الشهر ده')):start=today.replace(day=1).isoformat();period='هذا الشهر حتى اليوم'
     elif contains(q,('كل الطلبات','كل السلف','سجل الطلبات','سجل السلف')):start='0001-01-01';period='في السجل المتاح'
     profile=core.permissions.profile(c,u)
-    def result(text,source):return {'answer':'أبشر، '+e['name']+' '+text,'sources':[source+' — '+period]}
+    def result(text,source):return {'answer':'أبشر، '+e['name']+' ('+e['employee_no']+') — شركة '+e['company_name']+': '+text,'sources':[source+' — '+period]}
     def date_in(value):
         if not value:return False
         stamp=dt.datetime.fromisoformat(value.replace('Z','+00:00'))
@@ -218,13 +221,18 @@ def employee_facts_answer(c,u,question,core):
         return result('رصيده المتاح '+str(info['available'])+' يوم، والسنوي '+str(info['annual_entitlement'])+' يوم. دفعة الشهر تنضاف في نهاية الشهر حسب السجل.','رصيد الإجازات الفعلي')
     if contract:
         return result('شركته '+e['company_name']+'، القسم '+(e['department'] or 'غير مسجل')+'، المسمى '+(e['job'] or 'غير مسجل')+'، والعقد من '+str(e['contract_start'] or 'غير مسجل')+' إلى '+str(e['contract_end'] or 'غير مسجل')+'.','الملف الوظيفي المتاح')
-    if start!=end:return result('حدّد يومًا واحدًا لعرض بصمة الحضور؛ مثل اليوم أو أمس أو 02/11/2026.','سجل الحضور')
-    record=c.execute('SELECT check_in,check_out FROM attendance WHERE employee_id=? AND day=?',(e['id'],start)).fetchone()
+    if start!=end:
+        rows=c.execute('SELECT * FROM attendance WHERE employee_id=? AND day BETWEEN ? AND ?',(e['id'],start,end)).fetchall()
+        missing=core.hr.scan_absences(c,e,start,end,core)
+        seconds=sum(core.workforce.attendance_metrics(c,e,r)['duration_seconds'] for r in rows)
+        return result(f"أيام الحضور المسجلة {sum(bool(r['check_in']) for r in rows)}، الغياب المعتمد {sum(r['status']=='approved' for r in missing)}، أيام تنتظر مراجعة الغياب {sum(r['status']=='pending' for r in missing)}. إجمالي مدة الحضور المكتملة {seconds//3600:02d}:{seconds//60%60:02d}:{seconds%60:02d}.",'سجل الحضور ومراجعة الغياب')
+    record=c.execute('SELECT * FROM attendance WHERE employee_id=? AND day=?',(e['id'],start)).fetchone()
     if record and record['check_in']:state='حاضر '+period+'، سجّل الحضور الساعة '+record['check_in']+(' والانصراف الساعة '+record['check_out'] if record['check_out'] else '، وما سجّل انصراف إلى الآن')
     elif c.execute("SELECT 1 FROM absences WHERE employee_id=? AND day=? AND status='approved'",(e['id'],start)).fetchone():state='عليه غياب معتمد '+period
     elif c.execute("SELECT 1 FROM requests WHERE employee_id=? AND status='approved' AND type IN ('annual_leave','sick_leave','unpaid_leave') AND start_date<=? AND end_date>=?",(e['id'],start,start)).fetchone():state='عنده إجازة معتمدة '+period
     elif core.hr.holiday(c,e,start) or str(dt.date.fromisoformat(start).weekday()) not in e['workweek'].split(','):state=period+' راحة أو عطلة حسب جدوله'
     else:state='ما سجّل حضور '+period+'؛ هذا ما يثبت غيابًا معتمدًا، راجع الدوام والإجازات'
+    if record and record['check_in_site']:state+='، موقع البصمة '+record['check_in_site']
     return result(state+'.','سجل الحضور ضمن صلاحيات الحساب')
 
 
@@ -239,8 +247,20 @@ def handle(h,c,u,path,method,core):
     acquire(u['id'],core)
     try:
         reserve(u['id'],core)
-        facts=employee_facts_answer(c,u,question.strip(),core)
-        result=facts or generate(question.strip(),context(c,u,core),history)
+        company=delivery_updates.selected_company(c,u,d.get('company_id'),core)
+        people=[e for e in core.visible_employees(c,u) if company is None or e['company_id']==company]
+        effective=delivery_updates.effective_question(question.strip(),history,people,normalize)
+        general=contains(normalize(effective),('الواردة','الوارد','طلبات الموظفين','لخص')) and not any(normalize(e['name']) in normalize(effective) or normalize(e['employee_no']) in normalize(effective) for e in people)
+        facts=None if general else employee_facts_answer(c,u,effective,core,company)
+        summary=None if facts else delivery_updates.request_summary(c,u,effective,company,core,normalize,TYPE_NAMES,STATUS_NAMES)
+        result=facts or summary
+        if not result:
+            data=context(c,u,core)
+            if company is not None:
+                from collections import Counter
+                counts=Counter((r['type'],r['status']) for r in core.visible_requests(c,u,include_details=False) if r['company_id']==company)
+                data['request_counts']=[{'type':k[0],'status':k[1],'count':v} for k,v in counts.items()]
+            result=generate(effective,data,history)
         if not facts:result['answer']=saudi(result['answer'])
         core.record(c,u,'assistant_answer','user',u['id'],{'mode':'local_guidance','question_length':len(question)})
         c.commit()

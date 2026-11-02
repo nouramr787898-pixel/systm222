@@ -220,9 +220,11 @@ def notify(c,r,core,message,actor=None):
         if scope is not None and r['company_id']!=scope:continue
         if profile=='auditor' or (profile=='payroll' and r['type']!='advance') or (profile=='hr' and r['type']=='advance'):continue
         c.execute('INSERT INTO notifications(user_id,request_id,message,created_at) VALUES(?,?,?,?)',(uid,r['id'],message,core.now()))
+        import delivery_updates
+        body=delivery_updates.notification_body(c,core,r,uid,kinds)
         contact=c.execute('SELECT e.email FROM users u JOIN employees e ON e.id=u.employee_id WHERE u.id=?',(uid,)).fetchone()
         if contact and re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',contact[0] or ''):
-            c.execute('INSERT INTO email_outbox(user_id,request_id,destination,subject,created_at) VALUES(?,?,?,?,?)',(uid,r['id'],contact[0],message+f" EH-{r['id']:06d}",core.now()))
+            c.execute('INSERT INTO email_outbox(user_id,request_id,destination,subject,body,created_at) VALUES(?,?,?,?,?,?)',(uid,r['id'],contact[0],message+f" EH-{r['id']:06d}",body or '',core.now()))
 
 
 def coverage(c,eid,day):
