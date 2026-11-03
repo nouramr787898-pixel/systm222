@@ -52,7 +52,7 @@ def configure(root,android_id,ios_id):
     manifest=root/'android/app/src/main/AndroidManifest.xml'
     tree=ET.parse(manifest);document=tree.getroot()
     existing={p.get('{'+ANDROID+'}name') for p in document.findall('uses-permission')}
-    for permission in ('INTERNET','ACCESS_COARSE_LOCATION','ACCESS_FINE_LOCATION'):
+    for permission in ('INTERNET','ACCESS_COARSE_LOCATION','ACCESS_FINE_LOCATION','POST_NOTIFICATIONS'):
         name='android.permission.'+permission
         if name not in existing:document.insert(0,ET.Element('uses-permission',{'{'+ANDROID+'}name':name}))
     app=document.find('application')
@@ -93,6 +93,7 @@ def configure(root,android_id,ios_id):
     if not entitlements.exists():
         with entitlements.open('wb') as f:plistlib.dump({'keychain-access-groups':[]},f)
     pbx=root/'ios/Runner.xcodeproj/project.pbxproj';project=pbx.read_text()
+    project=re.sub(r'IPHONEOS_DEPLOYMENT_TARGET = [^;]+;', 'IPHONEOS_DEPLOYMENT_TARGET = 15.0;',project)
     project=re.sub(r'PRODUCT_BUNDLE_IDENTIFIER = ([^;]+);',lambda m:'PRODUCT_BUNDLE_IDENTIFIER = '+ios_id+('.RunnerTests' if m[1].strip().endswith('.RunnerTests') else '')+';',project)
     def build_settings(match):
         block=match[0]

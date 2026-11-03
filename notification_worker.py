@@ -83,16 +83,18 @@ def main():
 
 def start_background(connect):
     """Run one delivery loop per server process; atomic claims prevent duplicates."""
+    import mobile_push
     import threading
     import contextlib
     import time
-    if not ((os.environ.get('RESEND_API_KEY') and os.environ.get('RESEND_FROM_EMAIL')) or whatsapp_configured()):return
+    if not ((os.environ.get('RESEND_API_KEY') and os.environ.get('RESEND_FROM_EMAIL')) or whatsapp_configured() or mobile_push.configured()):return
     def run():
         while True:
             try:
                 with contextlib.closing(connect()) as c:
                     deliver(c,send=True,fresh_only=True)
                     deliver_whatsapp(c,send=True)
+                    mobile_push.deliver(c)
             except Exception:
                 print('NOTIFICATION WORKER: delivery check failed; inspect outbox status',flush=True)
             time.sleep(15)

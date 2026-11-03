@@ -16,3 +16,8 @@ ios/Flutter/flutter_export_environment.sh
 .env
 .env.*
 !*.example
+
+# Provider credentials and local app configuration
+**/google-services.json
+**/GoogleService-Info.plist
+**/*service-account*.json

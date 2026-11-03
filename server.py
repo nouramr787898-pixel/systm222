@@ -132,6 +132,8 @@ def init(seeder=None,allow_create=False):
  if not c.in_transaction:c.execute('BEGIN IMMEDIATE')
  migrate_workflow(c)
  hr.migrate(c)
+ import mobile_push
+ mobile_push.migrate(c)
  workforce.migrate(c);security.migrate(c);payroll.migrate(c);talent.migrate(c);directory_tools.migrate(c);permissions.migrate(c);requested_batch.migrate(c);delivery_updates.migrate(c);requested_batch.capture_leave_cutover(c,sys.modules[__name__])
  c.commit();c.close()
 
@@ -760,6 +762,8 @@ class Handler(BaseHTTPRequestHandler):
    u=self.actor(c)
    permissions.guard(self,c,u,path,method,sys.modules[__name__])
    if u['must_change_password'] and u['role']!='employee' and path not in ('/api/me','/api/security/password','/api/security/sessions','/api/logout'):fail('غيّر كلمة المرور المؤقتة من أمان الحساب أولًا',403)
+   import mobile_push
+   if mobile_push.handle(self,c,u,path,method,sys.modules[__name__]):return
    requested_batch.probation_sync(c,sys.modules[__name__]);c.commit()
    if requested_batch.handle(self,c,u,path,method,sys.modules[__name__]):return
    if ai_assistant.handle(self,c,u,path,method,sys.modules[__name__]):return
@@ -779,6 +783,7 @@ class Handler(BaseHTTPRequestHandler):
     token=security.request_token(self,sys.modules[__name__])
     if token:
      with LOCK:SESSIONS.pop(token,None)
+     c.execute('UPDATE push_devices SET enabled=0 WHERE session_hash=?',(security.digest(token),))
      c.execute('DELETE FROM auth_sessions WHERE token_hash=?',(security.digest(token),));c.commit()
     return self.write({'ok':True},headers={'Set-Cookie':'ehkam_session=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/'})
    if path=='/api/dashboard' and method=='GET':
@@ -1104,6 +1109,7 @@ class Handler(BaseHTTPRequestHandler):
      c.execute('UPDATE attendance SET check_out=?,source=?,check_out_at=?,check_out_site=? WHERE id=?',(stamp,'gps_geofence',now(),site['name'],row['id']))
      action='check_out';message='تم تسجيل الانصراف بنجاح'
     else:fail('تم تسجيل الحضور والانصراف لهذا اليوم بالفعل')
+    c.execute('INSERT INTO notifications(user_id,message,created_at) VALUES(?,?,?)',(u['id'],message+' · '+site['name'],now()))
     record(c,u,action,'attendance',e['id'],'distance_m='+str(round(distance,1))+'; accuracy_m='+str(round(accuracy,1)))
     c.commit();return self.write({'ok':True,'action':action,'message':message,'distance_m':round(distance,1),'radius_m':radius,'time':stamp})
    if path=='/api/archive/history' and method=='GET':
