@@ -142,14 +142,23 @@ def plan(root,config):
     return writes,pending
 
 
+def matches(path,data):
+    if not path.exists():return False
+    actual=path.read_bytes()
+    if path.name=='firebase_options.dart':
+        # Dart formatting may change whitespace while keeping the derived constants identical.
+        return re.sub(rb'\s+',b'',actual)==re.sub(rb'\s+',b'',data)
+    return actual==data
+
+
 def configure(root,check=False,require_hosts=False):
     config=load(root);writes,pending=plan(root,config)
     if require_hosts and pending:raise ValueError('Native hosts are required: '+' '.join(pending))
     if check:
-        if any(not path.exists() or path.read_bytes()!=data for path,data in writes.items()):raise ValueError('Firebase configuration is not applied; run tool/firebase_config.py first.')
+        if any(not matches(path,data) for path,data in writes.items()):raise ValueError('Firebase configuration is not applied; run tool/firebase_config.py first.')
     else:
         for path,data in writes.items():
-            if not path.exists() or path.read_bytes()!=data:path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
+            if not matches(path,data):path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
     return config,pending
 
 

@@ -32,8 +32,19 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(gradle.read_text().count(module.SIGNING_MARKER),1)
             self.assertNotIn('getByName("debug")',gradle.read_text())
             self.assertIn('throw GradleException',gradle.read_text())
+            self.assertIn('maxOf(flutter.minSdkVersion, 24)',gradle.read_text())
             self.assertIn('package com.ehkam.portal',(root/'android/app/src/main/kotlin/com/ehkam/portal/MainActivity.kt').read_text())
             self.assertEqual(pbx.read_text().count('CODE_SIGN_ENTITLEMENTS'),1)
             with info.open('rb') as f:self.assertIn('NSLocationWhenInUseUsageDescription',plistlib.load(f))
+
+    def test_cocoapods_configuration_preserves_content_and_is_repeatable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);(root/'ios/Flutter').mkdir(parents=True)
+            pod=root/'ios/Podfile';pod.write_text("# platform :ios, '13.0'\n# custom existing settings\n")
+            for mode in ('Debug','Release'):(root/'ios/Flutter'/f'{mode}.xcconfig').write_text('#include "Generated.xcconfig"\n')
+            module.configure_cocoapods(root);module.configure_cocoapods(root)
+            self.assertIn("platform :ios, '15.0'",pod.read_text())
+            self.assertIn('# custom existing settings',pod.read_text())
+            self.assertEqual((root/'ios/Flutter/Debug.xcconfig').read_text().count('Pods-Runner.debug.xcconfig'),1)
 
 if __name__=='__main__':unittest.main()

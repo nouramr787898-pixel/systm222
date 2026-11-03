@@ -68,6 +68,9 @@ def clients(root):
 
 
 def hosts(root):
+    (root/'ios/Podfile').write_text("platform :ios, '15.0'\n")
+    (root/'ios/Flutter').mkdir(parents=True,exist_ok=True)
+    for mode in ('Debug','Release'):(root/'ios/Flutter'/f'{mode}.xcconfig').write_text('#include \"Generated.xcconfig\"\n')
     settings=root/'android/settings.gradle.kts'
     settings.write_text('pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\nplugins { id("dev.flutter.flutter-plugin-loader") version "1.0.0" }\n')
     app=root/'android/app/build.gradle.kts'
@@ -105,6 +108,14 @@ class FirebaseConfigurationTests(unittest.TestCase):
         for field,value in [('IS_GCM_ENABLED',False),('GOOGLE_APP_ID','1:000:android:wrong')]:
             data={**original,field:value};path.write_bytes(plistlib.dumps(data))
             with self.assertRaises(ValueError):module.configure(self.root)
+
+    def test_dart_format_whitespace_does_not_invalidate_derived_options(self):
+        module.configure(self.root)
+        path=self.root/'lib/firebase_options.dart'
+        path.write_text(path.read_text().replace('return android;','\n      return android;'))
+        module.configure(self.root,check=True)
+        before=path.read_bytes();module.configure(self.root)
+        self.assertEqual(path.read_bytes(),before)
 
     def test_custom_options_are_not_overwritten(self):
         path=self.root/'lib/firebase_options.dart';path.parent.mkdir();path.write_text('// Custom implementation')

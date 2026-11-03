@@ -58,6 +58,7 @@ def configure(root,android_id,ios_id):
     app=document.find('application')
     if app is None:raise ValueError('Generated Android application element is missing.')
     app.set('{'+ANDROID+'}label',NAME);app.set('{'+ANDROID+'}allowBackup','false');app.set('{'+ANDROID+'}usesCleartextTraffic','false')
+    ET.indent(tree,space='    ')
     tree.write(manifest,encoding='utf-8',xml_declaration=True)
     debug=root/'android/app/src/debug/AndroidManifest.xml'
     debug.parent.mkdir(parents=True,exist_ok=True)
@@ -65,6 +66,7 @@ def configure(root,android_id,ios_id):
     debug_app=debug_tree.getroot().find('application')
     if debug_app is None:debug_app=ET.SubElement(debug_tree.getroot(),'application')
     debug_app.set('{'+ANDROID+'}usesCleartextTraffic','true');debug_app.set('{'+TOOLS+'}replace','android:usesCleartextTraffic')
+    ET.indent(debug_tree,space='    ')
     debug_tree.write(debug,encoding='utf-8',xml_declaration=True)
     gradle=root/'android/app/build.gradle.kts';text=gradle.read_text()
     old=re.search(r'namespace\s*=\s*"([^"]+)"',text)
@@ -72,7 +74,7 @@ def configure(root,android_id,ios_id):
     old_package=old[1]
     text=re.sub(r'(namespace\s*=\s*)"[^"]+"',lambda m:m[1]+'"'+android_id+'"',text)
     text=re.sub(r'(applicationId\s*=\s*)"[^"]+"',lambda m:m[1]+'"'+android_id+'"',text)
-    text=text.replace('minSdk = flutter.minSdkVersion','minSdk = maxOf(flutter.minSdkVersion, 23)')
+    text=text.replace('minSdk = flutter.minSdkVersion','minSdk = maxOf(flutter.minSdkVersion, 24)')
     if SIGNING_MARKER not in text:
         expected='signingConfig = signingConfigs.getByName("debug")'
         if expected not in text:raise ValueError('Custom signing already exists; review it manually rather than replacing it.')
@@ -102,6 +104,25 @@ def configure(root,android_id,ios_id):
         return block
     project=re.sub(r'buildSettings = \{.*?\n\t\t\t\};',build_settings,project,flags=re.S)
     pbx.write_text(project)
+
+
+def configure_cocoapods(root,flutter=None):
+    """Keep iOS plugin dependencies reproducible without committing Pods or local paths."""
+    podfile=root/'ios/Podfile'
+    if not podfile.exists():
+        if not flutter:raise ValueError('iOS Podfile is missing; provide an installed Flutter SDK to copy its official template.')
+        template=Path(flutter).resolve().parents[1]/'packages/flutter_tools/templates/cocoapods/Podfile-ios'
+        if not template.is_file():raise ValueError('Official Flutter iOS Podfile template is missing.')
+        podfile.write_bytes(template.read_bytes())
+    value=podfile.read_text()
+    value=re.sub(r"(?m)^#?\s*platform :ios, ['\"][0-9.]+['\"]", "platform :ios, '15.0'",value)
+    podfile.write_text(value)
+    for mode in ('Debug','Release'):
+        path=root/'ios/Flutter'/f'{mode}.xcconfig'
+        if not path.exists():raise ValueError('The official iOS Flutter xcconfig is missing.')
+        include=f'#include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.{mode.lower()}.xcconfig"'
+        content=path.read_text()
+        if include not in content:path.write_text(include+'\n'+content)
 
 
 def main():
@@ -134,6 +155,7 @@ def main():
             if any(path.read_bytes()!=data for path,data in snapshots.items()):raise RuntimeError('A supplied Firebase file changed during generation; review the host generator output.')
     elif missing:parser.error('Native hosts are missing; --configure-only cannot generate them.')
     configure(root,android_id,ios_id)
+    configure_cocoapods(root,shutil.which('flutter'))
     if firebase:firebase_config.configure(root,require_hosts=True)
     if not args.configure_only:subprocess.run(['flutter','pub','get'],cwd=root,check=True)
     print('Android/iOS hosts configured. Review bundle IDs, signing, icons and privacy before release.')

@@ -1,10 +1,12 @@
 // Derived from the supplied Firebase client configuration by tool/firebase_config.py.
 import 'package:firebase_core/firebase_core.dart';
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform;
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, kIsWeb, TargetPlatform;
 
 class DefaultFirebaseOptions {
   static FirebaseOptions get currentPlatform {
-    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) return android;
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
+      return android;
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) return ios;
     throw UnsupportedError('Firebase is configured for Android and iOS only.');
   }

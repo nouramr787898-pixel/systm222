@@ -2,7 +2,7 @@
 
 أُضيف ملفا إعداد العميل اللذان أرسلهما صاحب المشروع إلى `android/app/google-services.json` و`ios/Runner/GoogleService-Info.plist`. كلاهما لمشروع Firebase الحالي `ehkam-almasar` ولمعرف التطبيق `com.ehkam.portal`. تُشتق منهما `lib/firebase_options.dart` وتُمرر الخيارات صراحةً عند تهيئة Firebase.
 
-المستودع ما زال لا يحتوي مضيفَي Android وiOS الكاملين: توجد ملفات Firebase في مساريهما، لكن Gradle وXcode وInfo.plist لم تُولّد بعد. أداة `tool/bootstrap.py` تهيئ المضيفين الناقصين داخل تطبيق Flutter الحالي ثم تطبق إعداد Firebase، دون إنشاء مشروع Firebase جديد. `tool/firebase_config.py --check` يتحقق من الوضع المتاح ويعرض المضيفين الناقصين؛ أضف `--require-hosts` للفحص الصارم الذي يفشل حتى يكتمل توليدهما.
+مضيفا Android وiOS الكاملان موجودان الآن في المشروع: ملفات Gradle وXcode وInfo.plist وPodfile، وموارد Firebase مضمنة. تم توليدهما بالأداة الرسمية داخل مشروع Flutter الحالي. للتحقق استخدم `python3 tool/firebase_config.py --check --require-hosts`؛ لا يلزم توليد مشروع آخر أو تشغيل flutter create لفتح السورس.
 
 لم يُختبر إرسال واستقبال إشعار فعلي على هاتف. الاختبارات المحلية تستخدم مزود إرسال وهميًا. ملفات إعداد العميل لا توفر هوية إرسال الخادم أو مفتاح APNs أو توقيع المتاجر.
 
@@ -19,7 +19,7 @@
 ## 1. تطبيق العميل والمضيفان الأصليان
 
 1. استخدم مشروع Firebase الحالي `ehkam-almasar`؛ لا تنشئ مشروعًا آخر ولا تغيّر معرفَي التطبيق عن `com.ehkam.portal` ما دامت هذه الملفات معتمدة.
-2. داخل `mobile`، على جهاز به Flutter/Dart، نفّذ `python3 tool/bootstrap.py`. يقرأ المعرفات من الملفين، ويولد فقط المضيفين الناقصين بأداة Flutter الرسمية داخل المشروع الحالي، ثم يضبط Google Services Gradle plugin ‏4.4.4 على Android، وموارد Runner وAPNs وBackground Modes على iOS، ويجلب الاعتماديات. إن كانت المضيفات موجودة وتحتاج تطبيق الإعدادات فقط، استخدم `python3 tool/bootstrap.py --configure-only`. الأداة ترفض اختلاف المعرفات أو بعض الإعدادات المخصصة بدل استبدالها بصمت.
+2. داخل `mobile` نفّذ `flutter pub get`. إعداد Google Services Gradle plugin ‏4.4.4 وموارد Runner وAPNs وBackground Modes موجود بالفعل، ولا تحتاج لتوليد المضيفين من جديد. أداة `tool/bootstrap.py --configure-only` متاحة عند الحاجة لإعادة تطبيق الإعدادات بعد مراجعتها، وترفض اختلاف المعرفات وبعض الإعدادات المخصصة بدل استبدالها بصمت.
 3. نفّذ `python3 tool/firebase_config.py --check --require-hosts`. يجب ألا تظهر مضيفات ناقصة. ملف plist يجب أن يكون ضمن موارد Runner، وليس مجرد ملف موجود في المجلد. إعدادات أخرى مخصصة قد تتطلب مراجعة Xcode قبل قبول الأداة لها.
 4. لا يلزم تشغيل `flutterfire configure` من جديد لهذه الملفات. إن أعدت تنزيل ملفي العميل من Firebase، شغّل `python3 tool/firebase_config.py` لتحديث الخيارات المشتقة، ثم افحصها. لا تستبدل `firebase_options.dart` المشتق بتنفيذ مختلف دون مراجعة الربط.
 5. Android: تصريح `POST_NOTIFICATIONS` يضاف بأداة التجهيز، وطلب الإذن من «حسابي ← تفعيل إشعارات الهاتف». جرّب Android 13 أو أحدث.

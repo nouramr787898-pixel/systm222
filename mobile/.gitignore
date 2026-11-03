@@ -25,3 +25,13 @@ ios/Flutter/flutter_export_environment.sh
 # Supplied Firebase client app settings are intentionally versioned for this project.
 !/android/app/google-services.json
 !/ios/Runner/GoogleService-Info.plist
+
+# Editor state and machine-specific project files
+.idea/
+*.iml
+
+# Native build caches and legacy generated plugin metadata
+.kotlin/
+.cxx/
+.flutter-plugins
+.DS_Store
