@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'api.dart';
+import 'firebase_options.dart';
 
 /// Notification payloads never grant access: details always come from the authenticated API.
 class PhoneNotifications {
@@ -21,7 +22,12 @@ class PhoneNotifications {
 
   Future<void> _setup() async {
     if(_ready)return;
-    if(Firebase.apps.isEmpty)await Firebase.initializeApp();
+    if(Firebase.apps.isEmpty)await Firebase.initializeApp(options:DefaultFirebaseOptions.currentPlatform);
+    if(_disposed)return;
+    // Complete native initialization before marking ready or attaching listeners.
+    // A failed attempt can then be retried without leaving duplicate subscriptions.
+    await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(alert:false,badge:false,sound:false);
+    final initial=await FirebaseMessaging.instance.getInitialMessage();
     if(_disposed)return;
     _ready=true;
     _subscriptions.add(FirebaseMessaging.instance.onTokenRefresh.listen((token){
@@ -33,9 +39,7 @@ class PhoneNotifications {
     _subscriptions.add(FirebaseMessaging.onMessageOpenedApp.listen((message){
       if(!_disposed)updated(true);
     }));
-    // In foreground Android uses an in-app confirmation; iOS uses the same UI to avoid duplicates.
-    await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(alert:false,badge:false,sound:false);
-    final initial=await FirebaseMessaging.instance.getInitialMessage();
+    // Foreground notifications use the in-app UI to avoid duplicate banners.
     if(initial!=null&&!_disposed)updated(true);
   }
 
@@ -45,6 +49,19 @@ class PhoneNotifications {
     if(!_disposed)_token=token;
   }
 
+  Future<String?> _deviceToken() async {
+    // iOS registration can finish after the permission dialog; do not request FCM too early.
+    if(Platform.isIOS){
+      for(var attempt=0;attempt<20&&!_disposed;attempt++){
+        if(await FirebaseMessaging.instance.getAPNSToken()!=null)break;
+        if(attempt==19)return null;
+        await Future<void>.delayed(const Duration(milliseconds:250));
+      }
+    }
+    if(_disposed)return null;
+    return FirebaseMessaging.instance.getToken();
+  }
+
   Future<void> restore() async {
     try {
       if(await api.storage.read(key:_preferenceKey)=='true')return;
@@ -52,7 +69,7 @@ class PhoneNotifications {
       final settings=await FirebaseMessaging.instance.getNotificationSettings();
       if(settings.authorizationStatus==AuthorizationStatus.authorized||settings.authorizationStatus==AuthorizationStatus.provisional){
         _allowed=true;
-        final token=await FirebaseMessaging.instance.getToken();
+        final token=await _deviceToken();
         if(token!=null)await _register(token);
       }
     } catch(_) {/* Missing provider configuration must not prevent signing in. */}
@@ -67,7 +84,7 @@ class PhoneNotifications {
       }
       _allowed=true;
       await api.storage.delete(key:_preferenceKey);
-      final token=await FirebaseMessaging.instance.getToken();
+      final token=await _deviceToken();
       if(token==null)return 'تعذر تجهيز إشعارات الهاتف. جرّب مرة أخرى بعد اكتمال إعداد الخدمة.';
       await _register(token);
       return 'تم تسجيل الجهاز للإشعارات. وصولها يتطلب تفعيل خدمة الإرسال على السيرفر.';

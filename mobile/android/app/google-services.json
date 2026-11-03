@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "581075257560",
+    "project_id": "ehkam-almasar",
+    "storage_bucket": "ehkam-almasar.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:581075257560:android:29b0176ed8e26bdcf56fad",
+        "android_client_info": {
+          "package_name": "com.ehkam.portal"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAxyYy-Z6FHatJGqtS3ggHYdOFMCOedRjw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

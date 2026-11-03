@@ -106,16 +106,35 @@ def configure(root,android_id,ios_id):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--android-id',default='com.ehkam.portal')
-    parser.add_argument('--ios-id',default='com.ehkam.portal')
+    parser.add_argument('--android-id')
+    parser.add_argument('--ios-id')
     parser.add_argument('--configure-only',action='store_true')
     args=parser.parse_args();root=Path(__file__).resolve().parents[1]
-    identifier(args.android_id);identifier(args.ios_id)
+    config_paths=[root/'android/app/google-services.json',root/'ios/Runner/GoogleService-Info.plist']
+    firebase=None
+    if any(path.exists() for path in config_paths):
+        if not all(path.exists() for path in config_paths):parser.error('Both Firebase client files must be present before generating hosts.')
+        import firebase_config
+        firebase=firebase_config.load(root)
+    android_id=args.android_id or (firebase['android_id'] if firebase else 'com.ehkam.portal')
+    ios_id=args.ios_id or (firebase['ios_id'] if firebase else 'com.ehkam.portal')
+    identifier(android_id);identifier(ios_id)
+    if firebase and (android_id!=firebase['android_id'] or ios_id!=firebase['ios_id']):parser.error('Application IDs must match the supplied Firebase clients. No files were changed.')
+    if firebase:firebase_config.plan(root,firebase) # Validate existing hosts before modifying anything.
+    missing=[]
+    if not (root/'android/app/build.gradle.kts').exists():missing.append('android')
+    if not (root/'ios/Runner.xcodeproj/project.pbxproj').exists():missing.append('ios')
     if not args.configure_only:
         flutter=shutil.which('flutter')
         if not flutter:parser.error('Install Flutter stable (3.41+ / Dart 3.11+) and add flutter to PATH first.')
-        subprocess.run([flutter,'create','--platforms','android,ios','--project-name','ehkam_mobile','--org','com.ehkam','--no-pub','.'],cwd=root,check=True)
-    configure(root,args.android_id,args.ios_id)
+        if missing:
+            # Generate only missing hosts inside THIS Flutter app. Do not overwrite existing files.
+            snapshots={path:path.read_bytes() for path in config_paths if path.exists()}
+            subprocess.run([flutter,'create','--platforms',','.join(missing),'--project-name','ehkam_mobile','--org','com.ehkam','--no-pub','.'],cwd=root,check=True)
+            if any(path.read_bytes()!=data for path,data in snapshots.items()):raise RuntimeError('A supplied Firebase file changed during generation; review the host generator output.')
+    elif missing:parser.error('Native hosts are missing; --configure-only cannot generate them.')
+    configure(root,android_id,ios_id)
+    if firebase:firebase_config.configure(root,require_hosts=True)
     if not args.configure_only:subprocess.run(['flutter','pub','get'],cwd=root,check=True)
     print('Android/iOS hosts configured. Review bundle IDs, signing, icons and privacy before release.')
 

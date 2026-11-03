@@ -21,3 +21,7 @@ ios/Flutter/flutter_export_environment.sh
 **/google-services.json
 **/GoogleService-Info.plist
 **/*service-account*.json
+
+# Supplied Firebase client app settings are intentionally versioned for this project.
+!/android/app/google-services.json
+!/ios/Runner/GoogleService-Info.plist

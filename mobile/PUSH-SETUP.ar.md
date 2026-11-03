@@ -1,6 +1,10 @@
 # إعداد إشعارات الهاتف — للمطور المسؤول عن النشر
 
-الكود أُضيف، لكن الإرسال الفعلي لم يُجرّب على هاتف، ولا توجد في هذه الحزمة إعدادات مشروع Firebase أو مفاتيح Apple أو نسخة تطبيق مبنية. الاختبارات المحلية تستخدم مزود إرسال وهميًا فقط. لا تُعرض هذه النسخة بوصفها جاهزة للنشر قبل إتمام إعداد الخدمة والبناء والتجربة.
+أُضيف ملفا إعداد العميل اللذان أرسلهما صاحب المشروع إلى `android/app/google-services.json` و`ios/Runner/GoogleService-Info.plist`. كلاهما لمشروع Firebase الحالي `ehkam-almasar` ولمعرف التطبيق `com.ehkam.portal`. تُشتق منهما `lib/firebase_options.dart` وتُمرر الخيارات صراحةً عند تهيئة Firebase.
+
+المستودع ما زال لا يحتوي مضيفَي Android وiOS الكاملين: توجد ملفات Firebase في مساريهما، لكن Gradle وXcode وInfo.plist لم تُولّد بعد. أداة `tool/bootstrap.py` تهيئ المضيفين الناقصين داخل تطبيق Flutter الحالي ثم تطبق إعداد Firebase، دون إنشاء مشروع Firebase جديد. `tool/firebase_config.py --check` يتحقق من الوضع المتاح ويعرض المضيفين الناقصين؛ أضف `--require-hosts` للفحص الصارم الذي يفشل حتى يكتمل توليدهما.
+
+لم يُختبر إرسال واستقبال إشعار فعلي على هاتف. الاختبارات المحلية تستخدم مزود إرسال وهميًا. ملفات إعداد العميل لا توفر هوية إرسال الخادم أو مفتاح APNs أو توقيع المتاجر.
 
 ## الأحداث الحالية
 
@@ -12,20 +16,22 @@
 
 الإشعار خارج التطبيق عام لحماية بيانات الموظفين على شاشة القفل. تفاصيل الطلب وحالته تظهر بعد فتح التطبيق وتسجيل الدخول، عبر واجهة الإشعارات المعتادة. لا يحتوي Push على راتب أو بيانات مرضية أو اسم موظف. النقر يفتح قسم الإشعارات؛ يُجلب المحتوى من API الموثق.
 
-## 1. مشروع Firebase مملوك لصاحب التطبيق
+## 1. تطبيق العميل والمضيفان الأصليان
 
-1. أنشئ مشروعًا في Firebase Console بحساب صاحب التطبيق، وسجل تطبيق Android وiOS بمعرفيهما النهائيين المطابقين لحسابات النشر.
-2. بعد توليد المنصتين عبر `python3 tool/bootstrap.py`، نفّذ `flutter pub get` وثبّت Firebase CLI وFlutterFire CLI الرسميين، ثم نفّذ `flutterfire configure` للمشروع المملوك، واختر Android وiOS. اتبع مخرجات الأداة لتثبيت إعدادات المنصتين وGoogle Services Gradle plugin، وتحقق أن `Firebase.initializeApp()` يعمل بالإعدادات الأصلية للمنصة. إن اعتمدت `firebase_options.dart` بدلها، مرر `DefaultFirebaseOptions.currentPlatform` في `lib/push.dart`.
-3. تحقّق من وجود ملف Android الصحيح `android/app/google-services.json`، وملف iOS الصحيح `ios/Runner/GoogleService-Info.plist` وإضافته إلى Target Runner. لا تستخدم ملفات مشروع آخر.
-4. Android: تصريح `POST_NOTIFICATIONS` يضاف بأداة التجهيز، وطلب الإذن يتم من «حسابي ← تفعيل إشعارات الهاتف»؛ جرّب Android 13 أو أحدث.
-5. iOS: الحد الأدنى للمكتبات الحالية iOS 15. اضبط Runner وPodfile على 15 أو أحدث، ثم فعّل **Push Notifications** و**Background Modes → Remote notifications** في Signing & Capabilities. دع Xcode يضيف `aps-environment` إلى ملف entitlements المستخدم بالتوقيع (`Runner/Ehkam.entitlements`) حسب بيئة التوقيع، دون تثبيت قيمة إنتاجية عشوائية.
-6. من حساب Apple Developer أنشئ APNs authentication key وارفعه في Firebase → Project settings → Cloud Messaging لتطبيق iOS، مع Team ID وKey ID الصحيحين. لا ترفعه إلى GitHub ولا ترسله في المحادثة. أبقِ Firebase AppDelegate swizzling الافتراضي مفعّلًا ما لم تنفّذ بديله الرسمي.
+1. استخدم مشروع Firebase الحالي `ehkam-almasar`؛ لا تنشئ مشروعًا آخر ولا تغيّر معرفَي التطبيق عن `com.ehkam.portal` ما دامت هذه الملفات معتمدة.
+2. داخل `mobile`، على جهاز به Flutter/Dart، نفّذ `python3 tool/bootstrap.py`. يقرأ المعرفات من الملفين، ويولد فقط المضيفين الناقصين بأداة Flutter الرسمية داخل المشروع الحالي، ثم يضبط Google Services Gradle plugin ‏4.4.4 على Android، وموارد Runner وAPNs وBackground Modes على iOS، ويجلب الاعتماديات. إن كانت المضيفات موجودة وتحتاج تطبيق الإعدادات فقط، استخدم `python3 tool/bootstrap.py --configure-only`. الأداة ترفض اختلاف المعرفات أو بعض الإعدادات المخصصة بدل استبدالها بصمت.
+3. نفّذ `python3 tool/firebase_config.py --check --require-hosts`. يجب ألا تظهر مضيفات ناقصة. ملف plist يجب أن يكون ضمن موارد Runner، وليس مجرد ملف موجود في المجلد. إعدادات أخرى مخصصة قد تتطلب مراجعة Xcode قبل قبول الأداة لها.
+4. لا يلزم تشغيل `flutterfire configure` من جديد لهذه الملفات. إن أعدت تنزيل ملفي العميل من Firebase، شغّل `python3 tool/firebase_config.py` لتحديث الخيارات المشتقة، ثم افحصها. لا تستبدل `firebase_options.dart` المشتق بتنفيذ مختلف دون مراجعة الربط.
+5. Android: تصريح `POST_NOTIFICATIONS` يضاف بأداة التجهيز، وطلب الإذن من «حسابي ← تفعيل إشعارات الهاتف». جرّب Android 13 أو أحدث.
+6. iOS: الحد الأدنى iOS 15. راجع Runner وPodfile. الأداة تضيف `remote-notification`، وتضمّن ملف العميل في موارد Runner وتضيف `aps-environment` مع متغير البناء `APS_ENVIRONMENT`، بقيمة development لـDebug وproduction لـRelease/Profile. راجع التطابق مع ملف التهيئة والتوقيع الفعلي في Xcode؛ الأداة لا تصدر شهادة أو provisioning profile ولا تثبت جاهزية Apple Team. إذا كان الملف يحتوي إعداد APNs مخصصًا، تتوقف الأداة للمراجعة بدل استبداله. أكّد ظهور Push Notifications وBackground Modes → Remote notifications في Signing & Capabilities بعد التوليد، وراجع أي متطلبات إصدار Xcode المستخدم.
+7. اربط مفتاح APNs authentication key من حساب Apple Developer بتطبيق iOS داخل Firebase → Project settings → Cloud Messaging، مع Team ID وKey ID الصحيحين. لا ترفع المفتاح إلى GitHub. لا يمكن التأكد من هذا الربط من ملف GoogleService-Info.plist وحده. أبقِ Firebase AppDelegate swizzling الافتراضي مفعّلًا ما لم تنفّذ بديله الرسمي؛ الأداة ترفض تعطيله دون مراجعة.
+8. ينتظر كود الهاتف الحصول على APNs token قبل طلب FCM token على iPhone، مع مهلة محدودة وإمكانية إعادة المحاولة. هذا لا يلغي الحاجة إلى إعداد APNs والتوقيع الحقيقيين.
 
 ## 2. إعداد خادم Railway
 
 - ثبّت `requirements.txt` ضمن خطوة البناء (`python3 -m pip install -r requirements.txt`). المكتبة المطلوبة `google-auth[requests]`.
 - فعّل Firebase Cloud Messaging HTTP v1 API في المشروع، واستخدم هوية خدمة لهذا المشروع بصلاحية إرسال FCM المطلوبة فقط.
-- أضف `FIREBASE_PROJECT_ID` إلى متغيرات خدمة Railway.
+- أضف `FIREBASE_PROJECT_ID=ehkam-almasar` إلى متغيرات خدمة Railway بعد توفير هوية الإرسال الصحيحة. إعدادات العميل المرفقة لا تتضمن هوية خدمة للخادم.
 - وفّر بيانات هوية الخدمة في ملف محمي داخل بيئة الخادم، واضبط `GOOGLE_APPLICATION_CREDENTIALS` على مساره، أو استخدم Workload Identity/ADC مدعومًا. هذا مفتاح سري للخادم، ولا يدخل التطبيق أو GitHub أو ملفات التسليم. لا تستخدم بيانات هوية بيئة التطوير لمشروع آخر.
 - اسمح للخادم بالاتصال بـ `fcm.googleapis.com` وخدمة إصدار الرمز الخاصة بهويته، عادةً `oauth2.googleapis.com`. لا تعطل TLS.
 - عامل الإرسال الحالي يبدأ تلقائيًا عند بدء الخادم مع تحديد المشروع، ويفحص الطابور كل 15 ثانية. إذا لم تتوفر الهوية، يبقى الطابور دون ادعاء إرسال. تأكد من سجل التشغيل وحالات قاعدة البيانات قبل اعتماد الخدمة.
