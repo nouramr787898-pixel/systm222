@@ -538,7 +538,7 @@ class Handler(BaseHTTPRequestHandler):
    d=self.input();security.attempt(c,u['username'],security.peer(self),sys.modules[__name__]);full=c.execute('SELECT password_hash FROM users WHERE id=?',(u['id'],)).fetchone()
    if not verifypw(str(d.get('password','')),full[0]):fail('كلمة المرور الحالية غير صحيحة',403)
    username=str(d.get('username','')).strip();password=str(d.get('new_password',''));name=str(d.get('display_name','')).strip()
-   if not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}',username) or not 16<=len(password)<=128 or not name:fail('اسم دخول 3–64 حرفًا وكلمة مرور 16–128 حرفًا واسم معروض مطلوبون')
+   if not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}',username) or not security.valid_password(password) or not name:fail('اسم دخول 3–64 حرفًا وكلمة مرور 8–128 حرفًا واسم معروض مطلوبون')
    if c.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():fail('اسم الدخول مستخدم')
    chosen=d.get('profile','owner')
    if chosen not in ('owner','hr','payroll','auditor'):fail('دور إداري غير صالح')
@@ -569,7 +569,7 @@ class Handler(BaseHTTPRequestHandler):
    employee=user_allowed_emp(c,u,target['employee_id'])
    if employee['id']==u['employee_id'] or employee['archived'] or not self.account_active(c,target):fail('الحساب غير متاح لهذا الإجراء',403)
    password=str(d.get('new_password',''))
-   if not 12<=len(password)<=128:fail('كلمة المرور الجديدة 12–128 حرفًا')
+   if not security.valid_password(password):fail('كلمة المرور الجديدة 8–128 حرفًا')
    c.execute('UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?',(hashpw(password),target['id']))
    c.execute('DELETE FROM auth_sessions WHERE user_id=?',(target['id'],))
    c.execute('UPDATE password_resets SET used=1 WHERE user_id=?',(target['id'],))
@@ -581,7 +581,7 @@ class Handler(BaseHTTPRequestHandler):
    security.attempt(c,u['username'],security.peer(self),sys.modules[__name__])
    password=str(d.get('new_password',''))
    if not verifypw(str(d.get('current_password','')),full[0]):fail('كلمة المرور الحالية غير صحيحة',403)
-   if not 12<=len(password)<=128 or password==str(d.get('current_password','')):fail('كلمة المرور الجديدة 12–128 حرفًا ومختلفة عن الحالية')
+   if not security.valid_password(password) or password==str(d.get('current_password','')):fail('كلمة المرور الجديدة 8–128 حرفًا ومختلفة عن الحالية')
    c.execute('UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?',(hashpw(password),u['id']));c.execute('DELETE FROM auth_sessions WHERE user_id=?',(u['id'],));record(c,u,'password_change','user',u['id']);c.commit();self.write({'ok':True});return True
   return False
  def do_GET(self):self.process('GET')
@@ -739,7 +739,7 @@ class Handler(BaseHTTPRequestHandler):
    if method=='POST' and path=='/api/password/confirm':
     d=self.input();username=str(d.get('username','')).strip();password=str(d.get('new_password',''))
     grant=str(d.get('reset_token',''))
-    if len(password)<12 or len(password)>128:fail('كلمة المرور الجديدة 12 حرفًا على الأقل',400)
+    if not security.valid_password(password):fail('كلمة المرور الجديدة من 8 إلى 128 حرفًا',400)
     if len(grant)<40 or len(grant)>200:fail('يجب التحقق من الرمز أولًا',403)
     u=c.execute("SELECT * FROM users WHERE username=? AND role='employee'",(username,)).fetchone()
     if not u:fail('التحقق غير صالح أو منتهي',403)
@@ -837,7 +837,7 @@ class Handler(BaseHTTPRequestHandler):
     d['employee_no']=requested_batch.next_number(c,co)
     country,phone,email=clean_contacts(d)
     username=str(d.get('username') or d['name']).strip();newpw=str(d.get('login_password',''))
-    if not username or len(username)>128 or any(ord(ch)<32 for ch in username) or len(newpw)<10 or len(newpw)>128:fail('اسم موظف صالح لا يتجاوز 128 حرفًا وكلمة مرور 10–128 حرفًا مطلوبان')
+    if not username or len(username)>128 or any(ord(ch)<32 for ch in username) or not security.valid_password(newpw):fail('اسم موظف صالح لا يتجاوز 128 حرفًا وكلمة مرور 8–128 حرفًا مطلوبان')
     if c.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():fail('اسم المستخدم مستخدم بالفعل')
     extra_employee=['passport','nationality','birth_date','qualification','specialization','branch','iban','bank_name']
     keys=extra_employee+['phone_country','phone_local','email','photo','company_id','name','name_en','employee_no','identity_no','job','department','manager_id','status','hire_date','contract_start','contract_end','basic','housing','transport','other','annual_entitlement','carryover','workweek','work_start','work_end','payment_method']

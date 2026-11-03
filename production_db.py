@@ -59,7 +59,7 @@ def initialize(path,username,password,display_name):
     target=Path(path).expanduser().absolute()
     if os.path.lexists(target):raise FileExistsError('Target already exists. Initialization never overwrites a database.')
     if not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}',username):raise ValueError('Admin username must be 3-64 ASCII letters, digits, dot, dash or underscore')
-    if len(password)<16 or len(password)>128:raise ValueError('Use a unique administrator password of 16-128 characters')
+    if not server.security.valid_password(password):raise ValueError('Use a unique administrator password of 8-128 characters')
     if not display_name.strip() or len(display_name)>150:raise ValueError('Administrator display name is required (max 150 characters)')
     target.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.ehkam-init-',dir=target.parent) as folder:
@@ -108,7 +108,7 @@ def interactive_password():
     with warnings.catch_warnings():
         warnings.simplefilter('error',getpass.GetPassWarning)
         try:
-            password=getpass.getpass('Unique admin password (16+ characters, hidden): ')
+            password=getpass.getpass('Unique admin password (8+ characters, hidden): ')
             confirmation=getpass.getpass('Confirm password (hidden): ')
         except getpass.GetPassWarning as error:
             raise ValueError('Secure hidden terminal input is unavailable; initialization refused') from error

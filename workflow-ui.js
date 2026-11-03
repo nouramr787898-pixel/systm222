@@ -31,7 +31,7 @@ auditPage=async function(){
 };
 async function newSupervisorAccount(){
  const rows=await api('/supervisor-candidates');let selected=null;
- openModal('إضافة حساب مشرف',formwrap([dropdown('company_id','الشركة',[['','اختر الشركة أولًا'],...activeCompanyOptions()]),field('supervisorSearch','بحث بالاسم أو الهوية أو الرقم الوظيفي','search'),'<div class="employee-picker full" id="supervisorChoices"></div>',field('username','اسم دخول المشرف','text','','required pattern="[A-Za-z0-9_.-]{3,64}" autocomplete="off"'),field('new_password','كلمة مرور المشرف','password','','required minlength="12" maxlength="128" autocomplete="new-password"'),field('password','كلمة مرور المسؤول الحالية','password','','required autocomplete="current-password"')]),async v=>{
+ openModal('إضافة حساب مشرف',formwrap([dropdown('company_id','الشركة',[['','اختر الشركة أولًا'],...activeCompanyOptions()]),field('supervisorSearch','بحث بالاسم أو الهوية أو الرقم الوظيفي','search'),'<div class="employee-picker full" id="supervisorChoices"></div>',field('username','اسم دخول المشرف','text','','required pattern="[A-Za-z0-9_.-]{3,64}" autocomplete="off"'),field('new_password','كلمة مرور المشرف','password','','required minlength="8" maxlength="128" autocomplete="new-password"'),field('password','كلمة مرور المسؤول الحالية','password','','required autocomplete="current-password"')]),async v=>{
   if(!selected)throw Error('اختر موظفًا من القائمة');await api('/supervisor-accounts',{...v,employee_id:selected});notify('تم إنشاء حساب المشرف؛ تغيير كلمة المرور مطلوب عند أول دخول');
  });
  const submit=$('#modal [type=submit]');submit.disabled=true;

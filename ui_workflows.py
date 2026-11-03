@@ -138,7 +138,7 @@ def handle(h,c,u,path,method,core):
         if e['archived'] or not c.execute('SELECT 1 FROM companies WHERE id=? AND archived=0',(e['company_id'],)).fetchone():core.fail('الموظف أو الشركة غير نشط')
         if int(d.get('company_id',e['company_id']))!=e['company_id']:core.fail('حساب المشرف يجب أن يتبع شركة الموظف الحالية')
         username=str(d.get('username','')).strip();password=str(d.get('new_password',''))
-        if not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}',username) or not 12<=len(password)<=128:core.fail('اسم دخول مستقل 3–64 حرفًا وكلمة مرور 12–128 حرفًا مطلوبان')
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}',username) or not core.security.valid_password(password):core.fail('اسم دخول مستقل 3–64 حرفًا وكلمة مرور 8–128 حرفًا مطلوبان')
         if c.execute("SELECT 1 FROM users WHERE employee_id=? AND role='manager'",(e['id'],)).fetchone():core.fail('الموظف له حساب مشرف بالفعل',409)
         if c.execute('SELECT 1 FROM users WHERE username=?',(username,)).fetchone():core.fail('اسم الدخول مستخدم بالفعل',409)
         cur=c.execute("INSERT INTO users(username,password_hash,role,employee_id,company_id,display_name,must_change_password) VALUES(?,?,'manager',?,?,?,1)",(username,core.hashpw(password),e['id'],e['company_id'],e['name']))

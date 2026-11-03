@@ -123,3 +123,8 @@ def peer(handler):
             if not trusted(item):return str(ipaddress.ip_address(item))
     except ValueError:return address
     return address
+
+
+def valid_password(value):
+    """Shared policy: 8–128 characters, without composition requirements."""
+    return isinstance(value,str) and 8 <= len(value) <= 128

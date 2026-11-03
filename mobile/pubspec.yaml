@@ -1,7 +1,7 @@
 name: ehkam_mobile
 description: تطبيق إحكام المسار للموظفين والمشرفين والإدارة
 publish_to: none
-version: 0.1.0+1
+version: 0.1.1+2
 environment:
   sdk: '>=3.11.0 <4.0.0'
   flutter: '>=3.41.0'
