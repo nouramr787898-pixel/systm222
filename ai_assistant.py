@@ -1,6 +1,7 @@
 """Local rule-based guidance and scoped counts. No model, key or external calls."""
 import re
 import delivery_updates
+import company_assistant
 import threading
 import time
 import unicodedata
@@ -171,12 +172,12 @@ def employee_facts_answer(c,u,question,core,company_id=None):
     """Read-only, deterministic employee facts. Every source keeps its role scope."""
     import datetime as dt
     q=normalize(question)
-    attendance=contains(q,('حضر','حضرت','حاضر','حضور','غايب','غائب','بصمه','انصراف','فين','وين'))
+    attendance=contains(q,('حضر','حضرت','حاضر','حضور','غايب','غائب','بصمه','انصراف','انصرف'))
     advance=contains(q,('سلفه','سلف','قرض'))
     requests=contains(q,('طلب','طلبات','قدمت','قدم'))
     balance=contains(q,('رصيد','متراكم','اجمالي الاجازات'))
     contract=contains(q,('عقد','مسمى','قسم','اداره','وظيفته','وظيفتها','شركته','شركتها'))
-    attendance=attendance or contains(q,('غياب','غاب','حضوري'))
+    attendance=attendance or contains(q,('غياب','غاب','حضوري')) or bool(re.search(r'(?<!\w)(?:فين|وين|مكانه|موقعه)(?!\w)',q))
     if not any((attendance,advance,requests,balance,contract)) or contains(q,('كيف','ازاي','طريقه','خطوات')):return None
     visible=[e for e in core.visible_employees(c,u) if company_id is None or e['company_id']==company_id]
     def phrase(value):return bool(re.search(r'(?<!\w)'+re.escape(normalize(value))+r'(?!\w)',q))
@@ -186,6 +187,9 @@ def employee_facts_answer(c,u,question,core,company_id=None):
     if not matches:
         if contains(q,('رصيدي','طلباتي','حضرت انا','انا حضرت','سلفتي','عقدي')):matches=[e for e in visible if e['id']==u['employee_id']]
         elif not contains(q,('موظف','موظفه','شوف','شف ','وين','فين','هل ')):return None
+    if not matches and re.search(r'(?:الموظف ده|الموظف دا|هذا الموظف|الموظفه دي|هذه الموظفه)',q) and visible:
+        if len(visible)==1:matches=visible
+        else:return {'answer':'اختر الموظف المقصود من موظفي الشركة المحددة.','sources':['الموظفون المتاحون لحسابك في الشركة المختارة'],'choices':[{'id':e['id'],'name':e['name'],'employee_no':e['employee_no']} for e in visible]}
     if not matches:return {'answer':'ما لقيت موظفًا بهذا الاسم ضمن الموظفين المسموح لك بالاطلاع عليهم. اكتب الاسم الكامل أو الرقم الوظيفي.','sources':['نطاق الموظفين المسموح لحسابك']}
     if len(matches)>1:return {'answer':'أبشر، فيه أكثر من موظف بهذا الاسم: '+'، '.join(e['name']+' ('+e['employee_no']+')' for e in matches)+'. حدّد الاسم الكامل أو الرقم الوظيفي.','sources':['الموظفون ضمن صلاحيات الحساب'],'choices':[{'id':e['id'],'name':e['name'],'employee_no':e['employee_no']} for e in matches]}
     e=matches[0];today=core.TODAY();start=end=today.isoformat();period='اليوم'
@@ -250,10 +254,10 @@ def handle(h,c,u,path,method,core):
         company=delivery_updates.selected_company(c,u,d.get('company_id'),core)
         people=[e for e in core.visible_employees(c,u) if company is None or e['company_id']==company]
         effective=delivery_updates.effective_question(question.strip(),history,people,normalize)
-        general=contains(normalize(effective),('الواردة','الوارد','طلبات الموظفين','لخص')) and not any(normalize(e['name']) in normalize(effective) or normalize(e['employee_no']) in normalize(effective) for e in people)
-        facts=None if general else employee_facts_answer(c,u,effective,core,company)
-        summary=None if facts else delivery_updates.request_summary(c,u,effective,company,core,normalize,TYPE_NAMES,STATUS_NAMES)
-        result=facts or summary
+        company_result=company_assistant.company_query(c,u,effective,company,people,core,normalize,TYPE_NAMES,STATUS_NAMES)
+        facts=None if company_result else employee_facts_answer(c,u,effective,core,company)
+        summary=None if company_result or facts else delivery_updates.request_summary(c,u,effective,company,core,normalize,TYPE_NAMES,STATUS_NAMES)
+        result=company_result or facts or summary
         if not result:
             data=context(c,u,core)
             if company is not None:
@@ -261,7 +265,7 @@ def handle(h,c,u,path,method,core):
                 counts=Counter((r['type'],r['status']) for r in core.visible_requests(c,u,include_details=False) if r['company_id']==company)
                 data['request_counts']=[{'type':k[0],'status':k[1],'count':v} for k,v in counts.items()]
             result=generate(effective,data,history)
-        if not facts:result['answer']=saudi(result['answer'])
+            result['answer']=saudi(result['answer'])
         core.record(c,u,'assistant_answer','user',u['id'],{'mode':'local_guidance','question_length':len(question)})
         c.commit()
     finally:

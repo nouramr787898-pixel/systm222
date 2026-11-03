@@ -45,7 +45,8 @@ def effective_question(question,history,people,normal):
     if history and identity(question):
         for message in reversed(history):
             if message['role']=='user' and not identity(message['content']):return message['content']+' '+question
-    if history and any(x in normal(question) for x in ('رصيده','طلباته','عقده','انصرف','غيابه')):
+    general=bool(re.search(r'(?<!\w)(?:مين|من|اعرض|وريني|لخص|ملخص)(?!\w)',normal(question))) or any(x in normal(question) for x in ('الموظفين','الموظفون','طلبات الموظفين','المهام','متعملش'))
+    if history and not general and any(x in normal(question) for x in ('رصيده','طلباته','عقده','انصرف','غيابه')):
         for message in reversed(history):
             if message['role']!='user':continue
             matches=[e for e in people if normal(e['employee_no']) in normal(message['content']) or normal(e['name']) in normal(message['content'])]
