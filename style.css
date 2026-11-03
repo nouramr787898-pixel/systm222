@@ -202,3 +202,11 @@
 
 /* Read-only payroll allowance disclosure. */
 .allowance-breakdown summary{cursor:pointer;white-space:nowrap;color:var(--green);font-weight:600}.allowance-breakdown dl{min-width:210px;margin:10px 0}.allowance-breakdown dl>div{display:flex;justify-content:space-between;gap:16px;padding:5px 0;border-bottom:1px solid #e4ebe6}.allowance-breakdown dd{margin:0;white-space:nowrap}.allowance-breakdown small{display:block;max-width:260px;white-space:normal}
+
+.attendance-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;white-space:normal;background:#f5f8f6;border:1px solid var(--border);border-radius:12px;padding:16px;text-align:center}
+.attendance-summary section{display:flex;flex-direction:column;justify-content:center;gap:7px;padding:8px;min-width:0}
+.attendance-summary section+section{border-inline-start:1px solid var(--border)}
+.attendance-summary span{color:var(--muted);font-weight:700;font-size:12px}
+.attendance-summary strong{font-size:16px;color:var(--green);font-variant-numeric:tabular-nums}
+.attendance-summary small{font-size:11px;line-height:1.8}
+@media(max-width:660px){.attendance-summary{gap:4px;padding:8px}.attendance-summary section{padding:6px}.attendance-summary strong{font-size:13px}}
