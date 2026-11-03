@@ -8,6 +8,28 @@ IDLE_SECONDS = 30 * 60
 ABSOLUTE_SECONDS = 12 * 60 * 60
 
 
+def request_token(handler, core):
+    """Native clients use Bearer; browsers retain their HttpOnly cookie.
+
+    An explicit malformed/expired Authorization header never falls back to a
+    cookie belonging to a different account.
+    """
+    authorization = handler.headers.get('Authorization')
+    if authorization is not None:
+        scheme, separator, token = authorization.partition(' ')
+        if scheme.lower() != 'bearer' or not separator or not 32 <= len(token) <= 128 or any(ch.isspace() for ch in token):
+            core.fail('جلسة التطبيق غير صالحة؛ سجّل الدخول مجددًا', 401)
+        return token
+    from http.cookies import SimpleCookie, CookieError
+    cookie = SimpleCookie()
+    try:
+        cookie.load(handler.headers.get('Cookie', ''))
+    except CookieError:
+        core.fail('جلسة غير صالحة', 401)
+    value = cookie.get('ehkam_session')
+    return value.value if value else ''
+
+
 def migrate(c):
     c.execute('CREATE TABLE IF NOT EXISTS auth_sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),created_at INTEGER NOT NULL,last_seen INTEGER NOT NULL,expires_at INTEGER NOT NULL,user_agent TEXT NOT NULL)')
     c.execute('CREATE INDEX IF NOT EXISTS sessions_user ON auth_sessions(user_id)')

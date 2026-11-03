@@ -1,0 +1,26 @@
+name: ehkam_mobile
+description: تطبيق إحكام المسار للموظفين والمشرفين والإدارة
+publish_to: none
+version: 0.1.0+1
+environment:
+  sdk: '>=3.11.0 <4.0.0'
+  flutter: '>=3.41.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  http: 1.6.0
+  flutter_secure_storage: 11.2.0
+  geolocator: 14.1.2
+  file_picker: 13.3.2
+  url_launcher: 6.3.3
+  open_filex: 5.0.0
+  path_provider: 2.1.6
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/logo.png

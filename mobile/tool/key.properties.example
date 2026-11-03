@@ -1,0 +1,6 @@
+# Copy to android/key.properties and enter values securely on the build machine.
+# Do not commit key.properties or the upload keystore.
+storePassword=ENTER_SECURELY
+keyPassword=ENTER_SECURELY
+keyAlias=upload
+storeFile=/secure/path/upload-keystore.jks

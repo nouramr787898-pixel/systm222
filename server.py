@@ -484,8 +484,7 @@ class Handler(BaseHTTPRequestHandler):
    return data
   except Exception:fail('بيانات JSON غير صالحة')
  def actor(self,c):
-  cookie=SimpleCookie();cookie.load(self.headers.get('Cookie',''))
-  token=cookie.get('ehkam_session');value=token.value if token else ''
+  value=security.request_token(self,sys.modules[__name__])
   uid=security.actor(c,value)
   if not uid:fail('يرجى تسجيل الدخول',401)
   u=c.execute('SELECT id,username,role,employee_id,company_id,must_change_password,disabled FROM users WHERE id=?',(uid,)).fetchone()
@@ -626,7 +625,7 @@ class Handler(BaseHTTPRequestHandler):
   try:
    if method=='POST':security.same_origin(self,sys.modules[__name__])
    if requested_batch.public(self,c,path,method,sys.modules[__name__]):return
-   if method=='POST' and path=='/api/login':
+   if method=='POST' and path in ('/api/login','/api/mobile/login'):
     d=self.input();username=str(d.get('username','')).strip()[:128];security.attempt(c,username,security.peer(self),sys.modules[__name__]);u=c.execute('SELECT * FROM users WHERE username=?',(username,)).fetchone()
     if not u or not verifypw(str(d.get('password',''))[:128],u['password_hash']) or u['role']!=d.get('account_role'):
      c.execute('INSERT INTO audit(user_id,username,action,entity,info,timestamp) VALUES(NULL,?,"login_failed","user",?,?)',(username,json.dumps({'peer_hash':security.digest(security.peer(self))}),now()));c.commit();fail('بيانات الدخول أو نوع الحساب غير صحيحة',401)
@@ -634,6 +633,7 @@ class Handler(BaseHTTPRequestHandler):
     security.verify_mfa(c,u['id'],d.get('otp',''),sys.modules[__name__])
     token=security.create(c,u['id'],self.headers.get('User-Agent',''))
     record(c,u,'login','user',u['id']);c.commit()
+    if path=='/api/mobile/login':return self.write({'ok':True,'session_token':token,'expires_in':security.ABSOLUTE_SECONDS,'idle_timeout':security.IDLE_SECONDS})
     return self.write({'ok':True},headers={'Set-Cookie':'ehkam_session='+token+'; HttpOnly; SameSite=Strict; Path=/'+('; Secure' if persistent_database_required() else '')})
    if method=='POST' and path=='/api/password/request':
     d=self.input();username=str(d.get('username','')).strip();requested=str(d.get('channel') or 'email').strip().lower();ip=security.peer(self)
@@ -776,10 +776,10 @@ class Handler(BaseHTTPRequestHandler):
    if path=='/api/me' and method=='GET':return self.write({**dict(u),'must_change_password':bool(u['must_change_password'] and u['role']!='employee'),'timezone':'Asia/Riyadh','currency':'SAR','profile':permissions.profile(c,u),'company_scope':permissions.scope_company(c,u)})
    if path=='/api/logout' and method=='POST':
     record(c,u,'logout','user',u['id']);c.commit()
-    cookie=SimpleCookie();cookie.load(self.headers.get('Cookie',''));v=cookie.get('ehkam_session')
-    if v:
-     with LOCK:SESSIONS.pop(v.value,None)
-     c.execute('DELETE FROM auth_sessions WHERE token_hash=?',(security.digest(v.value),));c.commit()
+    token=security.request_token(self,sys.modules[__name__])
+    if token:
+     with LOCK:SESSIONS.pop(token,None)
+     c.execute('DELETE FROM auth_sessions WHERE token_hash=?',(security.digest(token),));c.commit()
     return self.write({'ok':True},headers={'Set-Cookie':'ehkam_session=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/'})
    if path=='/api/dashboard' and method=='GET':
     es=visible_employees(c,u);rr=visible_requests(c,u,False)
