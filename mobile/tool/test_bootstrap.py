@@ -14,6 +14,7 @@ class BootstrapTests(unittest.TestCase):
             root=Path(temp)
             manifest=root/'android/app/src/main/AndroidManifest.xml';manifest.parent.mkdir(parents=True)
             manifest.write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:label="Demo"/></manifest>')
+            (root/'android/settings.gradle.kts').write_text('plugins { id("com.android.application") version "8.11.1" apply false }')
             gradle=root/'android/app/build.gradle.kts'
             gradle.write_text('plugins { id("com.android.application") }\nandroid {\n    namespace = "com.demo.app"\n    defaultConfig { applicationId = "com.demo.app"; minSdk = flutter.minSdkVersion }\n    buildTypes { release { signingConfig = signingConfigs.getByName("debug") } }\n}\n')
             source=root/'android/app/src/main/kotlin/com/demo/app/MainActivity.kt';source.parent.mkdir(parents=True);source.write_text('package com.demo.app\nclass MainActivity')
@@ -46,5 +47,17 @@ class BootstrapTests(unittest.TestCase):
             self.assertIn("platform :ios, '15.0'",pod.read_text())
             self.assertIn('# custom existing settings',pod.read_text())
             self.assertEqual((root/'ios/Flutter/Debug.xcconfig').read_text().count('Pods-Runner.debug.xcconfig'),1)
+
+    def test_android_plugin_meets_locked_dependency_minimum_without_downgrade(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);(root/'android').mkdir();path=root/'android/settings.gradle.kts'
+            for existing,expected in [('8.11.1','8.12.1'),('8.12.1','8.12.1'),('8.13.0','8.13.0')]:
+                path.write_text('plugins { id("com.google.gms.google-services") version "4.4.4" apply false; id("com.android.application") version "'+existing+'" apply false }')
+                module.configure_android_toolchain(root)
+                self.assertIn('id("com.android.application") version "'+expected+'"',path.read_text())
+                self.assertIn('version "4.4.4"',path.read_text())
+            path.write_text('// Custom plugin aliases')
+            with self.assertRaises(ValueError):module.configure_android_toolchain(root)
+            self.assertEqual(path.read_text(),'// Custom plugin aliases')
 
 if __name__=='__main__':unittest.main()

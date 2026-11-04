@@ -72,7 +72,7 @@ def hosts(root):
     (root/'ios/Flutter').mkdir(parents=True,exist_ok=True)
     for mode in ('Debug','Release'):(root/'ios/Flutter'/f'{mode}.xcconfig').write_text('#include \"Generated.xcconfig\"\n')
     settings=root/'android/settings.gradle.kts'
-    settings.write_text('pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\nplugins { id("dev.flutter.flutter-plugin-loader") version "1.0.0" }\n')
+    settings.write_text('pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\nplugins { id("dev.flutter.flutter-plugin-loader") version "1.0.0"; id("com.android.application") version "8.12.1" apply false }\n')
     app=root/'android/app/build.gradle.kts'
     app.write_text('plugins { id("com.android.application") }\nandroid { namespace = "com.ehkam.portal"\n defaultConfig { applicationId = "com.ehkam.portal"; minSdk = flutter.minSdkVersion }\n buildTypes { release { signingConfig = signingConfigs.getByName("debug") } } }\n')
     manifest=root/'android/app/src/main/AndroidManifest.xml';manifest.parent.mkdir(parents=True)

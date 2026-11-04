@@ -47,8 +47,24 @@ def identifier(value):
     return value
 
 
+# package_info_plus 10.2.2 in pubspec.lock requires AGP >=8.12.1.
+MIN_ANDROID_GRADLE_PLUGIN='8.12.1'
+
+
+def configure_android_toolchain(root):
+    path=root/'android/settings.gradle.kts';text=path.read_text()
+    pattern=r'(id\("com\.android\.application"\)\s+version\s+")([0-9]+\.[0-9]+\.[0-9]+)(")'
+    match=re.search(pattern,text)
+    if not match:raise ValueError('Expected an explicit Android Gradle plugin version; review custom settings before changing them.')
+    version=lambda value:tuple(int(part) for part in value.split('.'))
+    if version(match[2])<version(MIN_ANDROID_GRADLE_PLUGIN):
+        text=text[:match.start(2)]+MIN_ANDROID_GRADLE_PLUGIN+text[match.end(2):]
+        path.write_text(text)
+
+
 def configure(root,android_id,ios_id):
     android_id=identifier(android_id);ios_id=identifier(ios_id)
+    configure_android_toolchain(root)
     manifest=root/'android/app/src/main/AndroidManifest.xml'
     tree=ET.parse(manifest);document=tree.getroot()
     existing={p.get('{'+ANDROID+'}name') for p in document.findall('uses-permission')}
