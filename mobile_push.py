@@ -48,12 +48,30 @@ def configured():
 
 
 def credentials():
-    # Explicit project selection is mandatory; unrelated cloud credentials are never used by default.
+    """Load Railway's sealed JSON directly in memory, or retain the existing ADC path.
+
+    Invalid explicit JSON never falls back to an unrelated ambient identity.
+    Secret contents and underlying SDK exceptions must not enter application logs.
+    """
     import google.auth
     from google.auth.transport.requests import Request
-    credentials,_=google.auth.default(scopes=['https://www.googleapis.com/auth/firebase.messaging'])
-    credentials.refresh(Request())
-    return credentials
+    scopes=['https://www.googleapis.com/auth/firebase.messaging']
+    raw=os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON')
+    try:
+        if raw is not None:
+            if len(raw)>65536:raise ValueError('credential_size')
+            info=json.loads(raw)
+            if not isinstance(info,dict) or info.get('type')!='service_account':raise ValueError('credential_type')
+            if info.get('project_id')!=os.environ.get('FIREBASE_PROJECT_ID'):raise ValueError('credential_project')
+            if info.get('token_uri') not in ('https://oauth2.googleapis.com/token','https://accounts.google.com/o/oauth2/token'):raise ValueError('credential_token_endpoint')
+            from google.oauth2 import service_account
+            auth=service_account.Credentials.from_service_account_info(info,scopes=scopes)
+        else:
+            auth,_=google.auth.default(scopes=scopes)
+        auth.refresh(Request())
+        return auth
+    except Exception:
+        raise RuntimeError('firebase_sender_credentials_unavailable') from None
 
 
 def send(token,notification_id,request_id,auth=None):

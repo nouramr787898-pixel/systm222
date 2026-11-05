@@ -89,12 +89,19 @@ def start_background(connect):
     import time
     if not ((os.environ.get('RESEND_API_KEY') and os.environ.get('RESEND_FROM_EMAIL')) or whatsapp_configured() or mobile_push.configured()):return
     def run():
+        last_push_ready=None
         while True:
             try:
                 with contextlib.closing(connect()) as c:
                     deliver(c,send=True,fresh_only=True)
                     deliver_whatsapp(c,send=True)
-                    mobile_push.deliver(c)
+                    push=mobile_push.deliver(c)
+                    if mobile_push.configured() and push['configured']!=last_push_ready:
+                        if push['configured']:
+                            print('PUSH: Firebase credential refresh succeeded; device delivery is not yet verified.',flush=True)
+                        else:
+                            print('PUSH: Firebase sender credentials unavailable; check secret configuration, project, dependencies and network.',flush=True)
+                        last_push_ready=push['configured']
             except Exception:
                 print('NOTIFICATION WORKER: delivery check failed; inspect outbox status',flush=True)
             time.sleep(15)
