@@ -82,30 +82,42 @@ def main():
 
 
 def start_background(connect):
-    """Run one delivery loop per server process; atomic claims prevent duplicates."""
+    """Keep phone delivery independent of slow email/WhatsApp network calls."""
     import mobile_push
     import threading
     import contextlib
     import time
-    if not ((os.environ.get('RESEND_API_KEY') and os.environ.get('RESEND_FROM_EMAIL')) or whatsapp_configured() or mobile_push.configured()):return
-    def run():
-        last_push_ready=None
+
+    def run_messages():
         while True:
             try:
                 with contextlib.closing(connect()) as c:
                     deliver(c,send=True,fresh_only=True)
                     deliver_whatsapp(c,send=True)
+            except Exception:
+                print('NOTIFICATION WORKER: delivery check failed; inspect outbox status',flush=True)
+            time.sleep(15)
+
+    def run_push():
+        last_push_ready=None
+        while True:
+            try:
+                with contextlib.closing(connect()) as c:
                     push=mobile_push.deliver(c)
-                    if mobile_push.configured() and push['configured']!=last_push_ready:
+                    if push['configured']!=last_push_ready:
                         if push['configured']:
                             print('PUSH: Firebase credential refresh succeeded; device delivery is not yet verified.',flush=True)
                         else:
                             print('PUSH: Firebase sender credentials unavailable; check secret configuration, project, dependencies and network.',flush=True)
                         last_push_ready=push['configured']
             except Exception:
-                print('NOTIFICATION WORKER: delivery check failed; inspect outbox status',flush=True)
+                print('PUSH: polling failed; check worker and database availability.',flush=True)
             time.sleep(15)
-    threading.Thread(target=run,name='notification-delivery',daemon=True).start()
+
+    if (os.environ.get('RESEND_API_KEY') and os.environ.get('RESEND_FROM_EMAIL')) or whatsapp_configured():
+        threading.Thread(target=run_messages,name='notification-delivery',daemon=True).start()
+    if mobile_push.configured():
+        threading.Thread(target=run_push,name='notification-push',daemon=True).start()
 
 
 if __name__=='__main__':main()

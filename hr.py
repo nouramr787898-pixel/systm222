@@ -219,7 +219,9 @@ def notify(c,r,core,message,actor=None):
         scope=permissions.scope_company(c,recipient)
         if scope is not None and r['company_id']!=scope:continue
         if profile=='auditor' or (profile=='payroll' and r['type']!='advance') or (profile=='hr' and r['type']=='advance'):continue
-        c.execute('INSERT INTO notifications(user_id,request_id,message,created_at) VALUES(?,?,?,?)',(uid,r['id'],message,core.now()))
+        notification=c.execute('INSERT INTO notifications(user_id,request_id,message,created_at) VALUES(?,?,?,?)',(uid,r['id'],message,core.now()))
+        import mobile_push
+        mobile_push.trace_notification(c,notification.lastrowid,uid)
         import delivery_updates
         body=delivery_updates.notification_body(c,core,r,uid,kinds)
         contact=c.execute('SELECT e.email FROM users u JOIN employees e ON e.id=u.employee_id WHERE u.id=?',(uid,)).fetchone()

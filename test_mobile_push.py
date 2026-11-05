@@ -70,6 +70,7 @@ class PushTests(unittest.TestCase):
         self.assertEqual(captured[0]['message']['data'],{'notification_id':'8','request_id':'9'})
         self.assertNotIn('employee',str(captured))
         self.assertEqual(captured[0]['message']['android']['ttl'],'3600s')
+        self.assertEqual(captured[0]['message']['android']['priority'],'HIGH')
 
     def test_logout_and_owner_change_cancel_previous_queue(self):
         session=self.mobile();self.register(session,user_id=1)
@@ -114,6 +115,29 @@ class PushTests(unittest.TestCase):
             mobile_push.deliver(c,invalid)
             self.assertEqual(c.execute('SELECT enabled FROM push_devices').fetchone()[0],0)
             self.assertEqual(mobile_push.deliver(c,lambda *r:self.fail('duplicate delivery'))['sent'],0)
+
+    def test_rejected_delivery_has_safe_log_and_is_not_automatically_retried(self):
+        import contextlib,io
+        self.register(self.mobile())
+        output=io.StringIO()
+        with server.conn() as c:
+            self.event(c)
+            def rejected(*args):raise mobile_push.PushProviderError('PERMISSION_DENIED',403)
+            with contextlib.redirect_stdout(output):self.assertEqual(mobile_push.deliver(c,rejected)['sent'],0)
+            self.assertEqual(c.execute('SELECT status FROM push_outbox').fetchone()[0],'needs_review')
+            self.assertEqual(mobile_push.deliver(c,lambda *args:self.fail('Rejected send was retried'))['sent'],0)
+        self.assertIn('FCM_REJECTED',output.getvalue());self.assertIn('http=403 code=PERMISSION_DENIED',output.getvalue())
+        self.assertNotIn(self.token,output.getvalue())
+
+    def test_request_trace_shows_whether_recipient_has_registered_devices(self):
+        import contextlib,io
+        self.register(self.mobile())
+        output=io.StringIO()
+        with patch.dict('os.environ',{'FIREBASE_PROJECT_ID':'ehkam-almasar'}),contextlib.redirect_stdout(output):
+            code,result=self.employee('requests',{'employee_id':2,'type':'open','notes':'PRIVATE REQUEST TEXT'})
+        self.assertEqual(code,201,result)
+        self.assertIn('NOTIFICATION_PREPARED',output.getvalue());self.assertIn('queued_devices=1',output.getvalue())
+        self.assertNotIn(self.token,output.getvalue());self.assertNotIn('PRIVATE REQUEST TEXT',output.getvalue())
 
     def test_opt_out_validation_unauthenticated_and_provider_not_configured(self):
         self.assertEqual(self.call('mobile/devices',{'token':self.token,'platform':'ios'})[0],401)

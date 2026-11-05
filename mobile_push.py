@@ -40,7 +40,10 @@ def handle(h,c,u,path,method,core):
         if old and (old[1]!=u['id'] or old[2]!=session):
             c.execute("UPDATE push_outbox SET status='cancelled' WHERE device_id=? AND status='pending'",(old[0],))
         c.execute('INSERT INTO push_devices(token,user_id,session_hash,platform) VALUES(?,?,?,?) ON CONFLICT(token) DO UPDATE SET user_id=excluded.user_id,session_hash=excluded.session_hash,platform=excluded.platform,enabled=1',(token,u['id'],session,platform))
-    c.commit();h.write({'ok':True});return True
+    c.commit()
+    if path.endswith('/remove'):print(f"PUSH: DEVICE_DISABLED user_id={u['id']}",flush=True)
+    else:print(f"PUSH: DEVICE_REGISTERED user_id={u['id']} platform={platform}",flush=True)
+    h.write({'ok':True});return True
 
 
 def configured():
@@ -74,22 +77,60 @@ def credentials():
         raise RuntimeError('firebase_sender_credentials_unavailable') from None
 
 
+SAFE_PROVIDER_CODES={
+    'UNREGISTERED','SENDER_ID_MISMATCH','THIRD_PARTY_AUTH_ERROR','APNS_AUTH_ERROR',
+    'PERMISSION_DENIED','UNAUTHENTICATED','INVALID_ARGUMENT','NOT_FOUND',
+    'RESOURCE_EXHAUSTED','QUOTA_EXCEEDED','UNAVAILABLE','INTERNAL',
+    'SERVICE_DISABLED','ACCESS_TOKEN_SCOPE_INSUFFICIENT','IAM_PERMISSION_DENIED',
+    'INVALID_RESPONSE','UNKNOWN',
+}
+
+
+class PushProviderError(RuntimeError):
+    def __init__(self,code='UNKNOWN',status=0):
+        self.code=code if isinstance(code,str) and code in SAFE_PROVIDER_CODES else 'UNKNOWN'
+        self.status=status if isinstance(status,int) and 100<=status<=599 else 0
+        super().__init__(f'FCM {self.status} {self.code}')
+
+
+class InvalidDevice(PushProviderError):
+    def __init__(self,status=404):super().__init__('UNREGISTERED',status)
+
+
+def trace_notification(c,notification_id,user_id):
+    if not configured():return
+    try:
+        count=c.execute('SELECT count(*) FROM push_outbox WHERE notification_id=?',(notification_id,)).fetchone()[0]
+        print(f'PUSH: NOTIFICATION_PREPARED notification_id={notification_id} user_id={user_id} queued_devices={count}',flush=True)
+    except Exception:
+        # Diagnostic output must never break an otherwise valid request transaction.
+        print('PUSH: notification trace unavailable.',flush=True)
+
+
+
 def send(token,notification_id,request_id,auth=None):
     auth=auth or credentials()
     data={'notification_id':str(notification_id)}
     if request_id is not None:data['request_id']=str(request_id)
-    payload={'message':{'token':token,'notification':{'title':'إحكام المسار','body':'لديك تحديث جديد في حسابك. افتح التطبيق لمعرفة التفاصيل.'},'data':data,'android':{'ttl':'3600s'},'apns':{'headers':{'apns-expiration':str(int(time.time())+3600)},'payload':{'aps':{'sound':'default'}}}}}
+    payload={'message':{'token':token,'notification':{'title':'إحكام المسار','body':'لديك تحديث جديد في حسابك. افتح التطبيق لمعرفة التفاصيل.'},'data':data,'android':{'ttl':'3600s','priority':'HIGH'},'apns':{'headers':{'apns-expiration':str(int(time.time())+3600)},'payload':{'aps':{'sound':'default'}}}}}
     request=urllib.request.Request('https://fcm.googleapis.com/v1/projects/'+os.environ['FIREBASE_PROJECT_ID']+'/messages:send',data=json.dumps(payload).encode(),headers={'Authorization':'Bearer '+auth.token,'Content-Type':'application/json'})
     try:
         with urllib.request.urlopen(request,timeout=20) as response:
-            if not json.load(response).get('name'):raise RuntimeError('push_not_confirmed')
+            result=json.load(response)
+            if not isinstance(result,dict) or not isinstance(result.get('name'),str) or not result['name']:raise PushProviderError('INVALID_RESPONSE',getattr(response,'status',200))
     except urllib.error.HTTPError as error:
-        result=json.loads(error.read(65536))
-        if any(d.get('errorCode')=='UNREGISTERED' for d in result.get('error',{}).get('details',[])):raise InvalidDevice() from None
-        raise RuntimeError('push_provider_rejected') from None
-
-
-class InvalidDevice(Exception):pass
+        try:
+            result=json.loads(error.read(65536))
+            info=result.get('error',{}) if isinstance(result,dict) else {}
+            if not isinstance(info,dict):info={}
+            details=info.get('details',[])
+            if not isinstance(details,list):details=[]
+            codes=[item.get('errorCode') or item.get('reason') for item in details if isinstance(item,dict)]
+            code=next((code for code in codes if code in SAFE_PROVIDER_CODES),info.get('status','UNKNOWN'))
+        except (ValueError,TypeError):code='UNKNOWN'
+        if code=='UNREGISTERED':raise InvalidDevice(error.code) from None
+        # Never log Google's raw message/body: it may contain a device token or account details.
+        raise PushProviderError(code,error.code) from None
 
 
 def deliver(c,sender=None):
@@ -107,17 +148,25 @@ def deliver(c,sender=None):
         session=c.execute('SELECT 1 FROM auth_sessions WHERE token_hash=? AND user_id=? AND expires_at>?',(r[6],r[1],int(time.time()))).fetchone()
         # Discard old notifications after outages instead of flooding the handset.
         fresh=c.execute("SELECT julianday('now')-julianday(?)<1",(r[10],)).fetchone()[0]
-        if not active or not session or not r[5] or r[1]!=r[4] or r[9] or not fresh:
+        reason=('inactive_account' if not active else 'invalid_session' if not session else 'disabled_device' if not r[5] else 'account_changed' if r[1]!=r[4] else 'already_read' if r[9] else 'expired_notification' if not fresh else '')
+        if reason:
+            print(f'PUSH: CANCELLED notification_id={r[7]} reason={reason}',flush=True)
             c.execute("UPDATE push_outbox SET status='cancelled' WHERE id=? AND status='pending'",(r[0],));c.commit();continue
         claim=c.execute("UPDATE push_outbox SET status='sending' WHERE id=? AND status='pending'",(r[0],));c.commit()
         if not claim.rowcount:continue
         try:sender(r[3],r[7],r[8])
-        except InvalidDevice:
+        except InvalidDevice as error:
+            print(f'PUSH: FCM_REJECTED notification_id={r[7]} http={error.status} code={error.code}',flush=True)
             c.execute('UPDATE push_devices SET enabled=0 WHERE id=?',(r[2],));c.execute("UPDATE push_outbox SET status='invalid_device' WHERE id=?",(r[0],))
+        except PushProviderError as error:
+            print(f'PUSH: FCM_REJECTED notification_id={r[7]} http={error.status} code={error.code}',flush=True)
+            c.execute("UPDATE push_outbox SET status='needs_review' WHERE id=?",(r[0],))
         except Exception:
+            print(f'PUSH: DELIVERY_UNCERTAIN notification_id={r[7]}',flush=True)
             # Unknown delivery outcome must not cause duplicate automatic sends.
             c.execute("UPDATE push_outbox SET status='needs_review' WHERE id=?",(r[0],))
         else:
+            print(f'PUSH: FCM_ACCEPTED notification_id={r[7]}; handset delivery not confirmed.',flush=True)
             c.execute("UPDATE push_outbox SET status='sent',sent_at=? WHERE id=?",(datetime.datetime.now(datetime.timezone.utc).isoformat(),r[0]));sent+=1
         c.commit()
     return {'configured':True,'sent':sent}
